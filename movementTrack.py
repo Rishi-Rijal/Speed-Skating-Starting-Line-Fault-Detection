@@ -14,12 +14,10 @@ cap = cv2.VideoCapture(0) #capturing the video default webcam
 #landmarks that are used to store last 5 landmaarks
 landMarks = []
 
-
-
 movement_threshold = 0.02
 
 #list to store current movements according to previous landmarks
-movements = []
+movements = [0,0,0,0,0]
 
 
 trackMovement = 0
@@ -58,7 +56,7 @@ while cap.isOpened():
           for index, landmark in enumerate(landMarks, start=0):
                if landmark is not None:
                     currMovement = np.linalg.norm(currLandmarks - landmark, axis=1).mean()
-                    movements.append(currMovement)
+                    movements[index] = currMovement
 
           for movement in movements:
                if movement > movement_threshold:

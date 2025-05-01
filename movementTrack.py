@@ -45,10 +45,7 @@ while cap.isOpened():
      
           #storing current landmarks
           currLandmarks = np.array([
-               (result.pose_landmarks.landmark[i].x,
-               result.pose_landmarks.landmark[i].y,
-               result.pose_landmarks.landmark[i].z)
-               for i in key_indices
+            (lm.x, lm.y, lm.z) for lm in result.pose_landmarks.landmark
         ])
 
 

@@ -16,7 +16,7 @@ prev_landmarks3 = None
 prev_landmarks4 = None
 prev_landmarks5 = None
 
-movement_threshold = 0.01
+movement_threshold = 0.02
 movement = 0
 sec_movement = 0
 thi_movement = 0

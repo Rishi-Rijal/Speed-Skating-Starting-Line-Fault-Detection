@@ -11,15 +11,11 @@ mp_drawing = mp.solutions.drawing_utils
 
 cap = cv2.VideoCapture(0) #capturing the video default webcam
 
-
-#landmarks -> that are used to store last 5 landmarks
-landMarks = []
+landMarks = [] #landmarks -> that are used to store last 5 landmarks
 
 movement_threshold = 0.02
 
-#list to store current movements according to previous landmarks
-movements = [0,0,0,0,0]
-
+movements = [0,0,0,0,0] #list to store current movements according to previous landmarks
 
 trackMovement = 0
 

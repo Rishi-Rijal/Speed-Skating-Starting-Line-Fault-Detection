@@ -125,7 +125,7 @@ def main():
         
         #at the pre start line
         if canGoToStartLine and canLeavePreStartLine:
-            playsound("goSound.mp3")
+            playsound("Sounds/goSound.mp3")
             canLeavePreStartLine = False
             TSinceGoToStart = time.time()
             playStarted = True
@@ -139,11 +139,11 @@ def main():
             TelapsedSinceGoToStart = time.time() - TSinceGoToStart
             isCrossed = crossedLine(frame, StartLine)
             if isCrossed and (not corssedStartLineBeforeStart) and (TelapsedSinceGoToStart >= 2) and playStarted:
-                playsound("falseStartBuzzer.mp3")
+                playsound("Sounds/falseStartBuzzer.mp3")
                 corssedStartLineBeforeStart = True
 
             if(TelapsedSinceGoToStart >= 5 and isReady(frame,400)) and (not readySoundHeard):
-                playsound("readySound.mp3")
+                playsound("Sounds/readySound.mp3")
                 readySoundHeard = True
                 TSinceReadySound = time.time()
 
@@ -153,7 +153,7 @@ def main():
             startOK = TelapsedSinceReadySound >=3 and TelapsedSinceReadySound <= 4.1
             if startOK and not falseStartOnce:
                 if isMovement(frame, landMarks,movements,0.02):
-                    playsound("falseStartBuzzer.mp3")
+                    playsound("Sounds/falseStartBuzzer.mp3")
                     falseStartOnce = True
             if(not falseStartOnce and TelapsedSinceReadySound>=4.1) and not gameStarted:
                 playsound("gunSound.mp3")

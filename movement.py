@@ -35,7 +35,6 @@ def isMovement(openCVFrame, landMarks: list, movements: list, movementThreshold:
     # Movement threshold check
     for movement in movements:
         if movement > movementThreshold:
-            print(f"A movement here!")
             cv2.putText(openCVFrame, 'Significant Movement!', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
                         1, (0, 255, 0), 2, cv2.LINE_AA)
             return True

@@ -47,7 +47,6 @@ def preStartingLine(frame:np.array, movements:list, start_time, threshold:int = 
         if NOSE_Y < 180:
             start_time = time.time()
     else:
-        status = "Not ready"
         start_time = None  # reset if user is out of position
 
     draw_lines(frame, 180, 220, status)
@@ -94,7 +93,7 @@ def notInStartingPosition(frame:np.array, imaginaryStartLine, startLine):
 def main():
     cap = cv2.VideoCapture(0) #capturing the video default webcam
     landMarks = [] #landmarks -> that are used to store last 5 landmarks
-    movement_threshold = 0.02
+    movementThreshold = 0.02
     movements = [0,0,0,0,0] #list to store current movements according to previous landmarks
 
     #-----------------------#
@@ -121,6 +120,7 @@ def main():
     while cap.isOpened():
         ret, frame = cap.read()
         """Pre starting line phase"""
+        isMovement(frame, landMarks,movements,movementThreshold)
         TpreStart, canGoToStartLine = preStartingLine(frame, movements, TpreStart)
         
         #at the pre start line

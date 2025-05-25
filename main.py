@@ -1,165 +1,125 @@
-#importing different modules
 import cv2
 import numpy as np
 import mediapipe as mp
 import time
 import pygame
 from movement import isMovement
-from utils import draw_lines, get_landmark_y, get_pose_landmarks
+from utils import draw_lines, get_pose_landmarks, get_landmark_y
+
+# Constants
+PRE_START_Y_MIN = 180
+PRE_START_Y_MAX = 220
+START_LINE_Y = 400
+IMAGINARY_START_LINE_OFFSET = 50
+MOVEMENT_THRESHOLD = 0.02
+READY_HOLD_TIME = 3
+READY_TO_START_DELAY = 5
+START_OK_WINDOW = (3, 4.1)
 
 mp_pose = mp.solutions.pose
 pose = mp_pose.Pose()
 
-def getCurrentLandmarks(frame:np.array):
-    #only  nose right now but will be implimented for the whole body afterwards
-    result = pose.process(frame)
-    if result.pose_landmarks is None:
-        return None
+def get_nose_y(frame):
+    landmarks = get_pose_landmarks(frame)
+    if landmarks is not None:
+        return get_landmark_y(landmarks, frame, mp_pose.PoseLandmark.NOSE)
+    return None
 
-    image_height, image_width, _ = frame.shape
-    nose_landmark = result.pose_landmarks.landmark[mp.solutions.pose.PoseLandmark.NOSE]
-    currYLandmarks = int(nose_landmark.y * image_height)
-
-    return currYLandmarks
-
-def preStartingLine(frame:np.array, movements:list, start_time, threshold:int = 0.02, timeThreshold = 3):
-    """all the activities in pre starting line """
+def preStartingLine(frame, start_time):
     goToTheStart = False
-    currLandmark = get_pose_landmarks(frame)
-    if currLandmark is None:
-        return None, None
-    NOSE_Y = get_landmark_y(currLandmark, frame, mp.solutions.pose.PoseLandmark.NOSE)
+    nose_y = get_nose_y(frame)
     status = "Not Ready"
 
-    if NOSE_Y is None:
+    if nose_y is None:
         return None, None
 
-    if NOSE_Y > 180 and NOSE_Y < 220:
+    if PRE_START_Y_MIN < nose_y < PRE_START_Y_MAX:
         if start_time is None:
             start_time = time.time()
-        
+
         elapsed = time.time() - start_time
-        print(elapsed)
-        if elapsed >= timeThreshold:
+        if elapsed >= READY_HOLD_TIME:
             status = "Ready"
             goToTheStart = True
-
-        if NOSE_Y < 180:
-            start_time = time.time()
     else:
-        start_time = None  # reset if user is out of position
+        start_time = None
 
-    draw_lines(frame, 180, 220, status)
-    return (start_time, goToTheStart)
+    draw_lines(frame, PRE_START_Y_MIN, PRE_START_Y_MAX, status)
+    return start_time, goToTheStart
 
-def crossedLine(frame:np.array, lineLimit: int) -> bool:
-    currYLandmarks = getCurrentLandmarks(frame)
-    if currYLandmarks is None:
+def crossedLine(frame):
+    nose_y = get_nose_y(frame)
+    return nose_y is not None and nose_y > START_LINE_Y
+
+def isReady(frame):
+    nose_y = get_nose_y(frame)
+    if nose_y is None:
         return False
-    print("landmark: ", currYLandmarks)
-    if(currYLandmarks > lineLimit):
-        return True
-    return False
+    imaginary_line = START_LINE_Y - IMAGINARY_START_LINE_OFFSET
+    draw_lines(frame, imaginary_line, START_LINE_Y, "")
+    return imaginary_line <= nose_y <= START_LINE_Y and not crossedLine(frame)
 
-def isReady(frame:np.array, lineLimit:int) ->bool:
-    currYLandmarks = getCurrentLandmarks(frame)
-    if currYLandmarks is None:
-        return False
-    imaginaryBackStartLine = lineLimit - 50
-    
-    draw_lines(frame, 350,400,"")
-    if(currYLandmarks >= imaginaryBackStartLine and currYLandmarks <= lineLimit):
-        if not crossedLine(frame, lineLimit):
-            return True
-        
-    return False
-
-def playsound(filename:str):
-    pygame.mixer.init()
-    pygame.mixer.music.load(filename)
-    pygame.mixer.music.play()
-
-def notInStartingPosition(frame:np.array, imaginaryStartLine, startLine):
-    currYLandmarks = getCurrentLandmarks(frame)
-    if currYLandmarks is None:
-        return True
-    
-    if currYLandmarks < imaginaryStartLine or currYLandmarks > startLine:
-        return True
-        
-    return False
-
+def playsound(filename):
+    try:
+        pygame.mixer.init()
+        pygame.mixer.music.load(filename)
+        pygame.mixer.music.play()
+    except Exception as e:
+        print(f"Error playing sound {filename}: {e}")
 
 def main():
-    cap = cv2.VideoCapture(0) #capturing the video default webcam
-    landMarks = [] #landmarks -> that are used to store last 5 landmarks
-    movementThreshold = 0.02
-    movements = [0,0,0,0,0] #list to store current movements according to previous landmarks
-
-    #-----------------------#
-    preStartLine = 200
-    StartLine = 400
-
-    playStarted = False
+    cap = cv2.VideoCapture(0)
+    landMarks = []
+    movements = [0] * 5
 
     TpreStart = None
     canLeavePreStartLine = True
-
     TSinceGoToStart = None
-    corssedStartLineBeforeStart = False
-
+    crossedTooEarly = False
     readySoundHeard = False
     TSinceReadySound = None
-
-    startOK = False
     falseStartOnce = False
     gameStarted = False
 
-
-
     while cap.isOpened():
         ret, frame = cap.read()
-        """Pre starting line phase"""
-        isMovement(frame, landMarks,movements,movementThreshold)
-        TpreStart, canGoToStartLine = preStartingLine(frame, movements, TpreStart)
-        
-        #at the pre start line
+        if not ret:
+            break
+
+        isMovement(frame, landMarks, movements, MOVEMENT_THRESHOLD)
+        TpreStart, canGoToStartLine = preStartingLine(frame, TpreStart)
+
         if canGoToStartLine and canLeavePreStartLine:
             playsound("Sounds/goSound.mp3")
             canLeavePreStartLine = False
             TSinceGoToStart = time.time()
-            playStarted = True
 
-        """Starting line"""
-        #check if the skater has crossed the line or not
-        #if startingLineStartTime is None:
-    
-        #ready section
-        if TSinceGoToStart is not None:
-            TelapsedSinceGoToStart = time.time() - TSinceGoToStart
-            isCrossed = crossedLine(frame, StartLine)
-            if isCrossed and (not corssedStartLineBeforeStart) and (TelapsedSinceGoToStart >= 2) and playStarted:
+        if TSinceGoToStart:
+            elapsed = time.time() - TSinceGoToStart
+
+            if crossedLine(frame) and not crossedTooEarly and elapsed >= 2:
                 playsound("Sounds/falseStartBuzzer.mp3")
-                corssedStartLineBeforeStart = True
+                crossedTooEarly = True
 
-            if(TelapsedSinceGoToStart >= 5 and isReady(frame,400)) and (not readySoundHeard):
+            if elapsed >= READY_TO_START_DELAY and isReady(frame) and not readySoundHeard:
                 playsound("Sounds/readySound.mp3")
                 readySoundHeard = True
                 TSinceReadySound = time.time()
 
-        #after ready section 
-        if TSinceReadySound is not None:
-            TelapsedSinceReadySound = time.time() - TSinceReadySound
-            startOK = TelapsedSinceReadySound >=3 and TelapsedSinceReadySound <= 4.1
+        if TSinceReadySound:
+            start_elapsed = time.time() - TSinceReadySound
+            startOK = START_OK_WINDOW[0] <= start_elapsed <= START_OK_WINDOW[1]
+
             if startOK and not falseStartOnce:
-                if isMovement(frame, landMarks,movements,0.02):
+                if isMovement(frame, landMarks, movements, MOVEMENT_THRESHOLD):
                     playsound("Sounds/falseStartBuzzer.mp3")
                     falseStartOnce = True
-            if(not falseStartOnce and TelapsedSinceReadySound>=4.1) and not gameStarted:
+
+            if not falseStartOnce and start_elapsed > START_OK_WINDOW[1] and not gameStarted:
                 playsound("gunSound.mp3")
                 gameStarted = True
-                     
-        cv2.imshow('Filtered Movement Detection', frame)
+
+        cv2.imshow('Speed Skating False Start Detection', frame)
         if cv2.waitKey(1) & 0xFF == 27:
             break
 

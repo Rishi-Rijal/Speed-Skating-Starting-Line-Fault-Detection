@@ -1,10 +1,13 @@
 import cv2
-import numpy as np
-import mediapipe as mp
 import time
 import pygame
 from movement import isMovement
-from utils import draw_lines, get_pose_landmarks, get_landmark_y
+from utils import draw_lines
+from detection import (
+    isReady,
+    preStartingLine,
+    crossedLine,
+)
 
 # Constants
 PRE_START_Y_MIN = 100
@@ -20,49 +23,7 @@ READY_SOUND = "Sounds/readySound.mp3"
 FALSE_START_SOUND = "Sounds/falseStartBuzzer.mp3"
 GUN_SOUND = "Sounds/gunSound.mp3"
 
-mp_pose = mp.solutions.pose
-pose = mp_pose.Pose()
 
-def get_landmark_y_center(frame, landmark_ids):
-    landmarks = get_pose_landmarks(frame)
-    if landmarks is None:
-        return None
-    y_vals = [get_landmark_y(landmarks, frame, lid) for lid in landmark_ids]
-    return int(np.mean(y_vals))
-
-def preStartingLine(frame, start_time):
-    goToTheStart = False
-    hips_y = get_landmark_y_center(frame, [mp_pose.PoseLandmark.LEFT_HIP, mp_pose.PoseLandmark.RIGHT_HIP])
-    status = "Not Ready"
-
-    if hips_y is None:
-        return None, None
-
-    if PRE_START_Y_MIN < hips_y < PRE_START_Y_MAX:
-        if start_time is None:
-            start_time = time.time()
-        elapsed = time.time() - start_time
-        if elapsed >= 3:
-            status = "Ready"
-            goToTheStart = True
-    else:
-        start_time = None
-
-    draw_lines(frame, PRE_START_Y_MIN, PRE_START_Y_MAX, status)
-    print(hips_y)
-    return start_time, goToTheStart
-
-def crossedLine(frame):
-    ankles_y = get_landmark_y_center(frame, [mp_pose.PoseLandmark.LEFT_ANKLE, mp_pose.PoseLandmark.RIGHT_ANKLE])
-    return ankles_y is not None and ankles_y > START_LINE_Y
-
-def isReady(frame):
-    hips_y = get_landmark_y_center(frame, [mp_pose.PoseLandmark.LEFT_HIP, mp_pose.PoseLandmark.RIGHT_HIP])
-    if hips_y is None:
-        return False
-    imaginary_line = START_LINE_Y - IMAGINARY_START_LINE_OFFSET
-    draw_lines(frame, imaginary_line, START_LINE_Y, "")
-    return imaginary_line <= hips_y <= START_LINE_Y and not crossedLine(frame)
 
 def playsound(filename):
     try:
@@ -95,7 +56,13 @@ def main():
         draw_lines(frame, PRE_START_Y_MIN, PRE_START_Y_MAX,state="done")
         imaginary_line = START_LINE_Y - IMAGINARY_START_LINE_OFFSET
         draw_lines(frame, imaginary_line, START_LINE_Y, "yayy")
-        TpreStart, canGoToStartLine = preStartingLine(frame, TpreStart)
+        TpreStart, canGoToStartLine = preStartingLine(
+            frame,
+            TpreStart,
+            PRE_START_Y_MIN,
+            PRE_START_Y_MAX,
+            READY_HOLD_TIME,
+        )
 
         if canGoToStartLine and canLeavePreStartLine:
             playsound(GO_SOUND)
@@ -105,11 +72,11 @@ def main():
         if TSinceGoToStart:
             elapsed = time.time() - TSinceGoToStart
 
-            if crossedLine(frame) and not crossedTooEarly and elapsed >= 2:
+            if crossedLine(frame, START_LINE_Y) and not crossedTooEarly and elapsed >= 2:
                 playsound(FALSE_START_SOUND)
                 crossedTooEarly = True
 
-            if elapsed >= 5 and isReady(frame) and not readySoundHeard:
+            if elapsed >= 5 and isReady(frame, START_LINE_Y, IMAGINARY_START_LINE_OFFSET) and not readySoundHeard:
                 playsound(READY_SOUND)
                 readySoundHeard = True
                 TSinceReadySound = time.time()

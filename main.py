@@ -60,7 +60,7 @@ def isReady(frame):
     hips_y = get_landmark_y_center(frame, [mp_pose.PoseLandmark.LEFT_HIP, mp_pose.PoseLandmark.RIGHT_HIP])
     if hips_y is None:
         return False
-    imaginary_line = START_LINE_Y - 50
+    imaginary_line = START_LINE_Y - IMAGINARY_START_LINE_OFFSET
     draw_lines(frame, imaginary_line, START_LINE_Y, "")
     return imaginary_line <= hips_y <= START_LINE_Y and not crossedLine(frame)
 
@@ -93,7 +93,7 @@ def main():
 
         isMovement(frame, landMarks, movements, MOVEMENT_THRESHOLD, fullBody=True)
         draw_lines(frame, PRE_START_Y_MIN, PRE_START_Y_MAX,state="done")
-        imaginary_line = START_LINE_Y - 50
+        imaginary_line = START_LINE_Y - IMAGINARY_START_LINE_OFFSET
         draw_lines(frame, imaginary_line, START_LINE_Y, "yayy")
         TpreStart, canGoToStartLine = preStartingLine(frame, TpreStart)
 

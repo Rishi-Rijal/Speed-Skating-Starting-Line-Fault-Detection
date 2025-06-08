@@ -80,7 +80,7 @@ class SkatingControlPanel(QWidget):
             "goSound": getattr(self, "go_sound", "Sounds/goSound.mp3"),
             "readySound": getattr(self, "ready_sound", "Sounds/readySound.mp3"),
             "falseStartSound": getattr(self, "false_start_sound", "Sounds/falseStartBuzzer.mp3"),
-            "gunSound": getattr(self, "gun_sound", "gunSound.mp3")
+            "gunSound": getattr(self, "gun_sound", "Sounds/gunSound.mp3")
         }
 
         with open("config.json", "w") as f:

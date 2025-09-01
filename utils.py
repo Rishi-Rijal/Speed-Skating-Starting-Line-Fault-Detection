@@ -1,45 +1,58 @@
 import cv2
-import mediapipe as mp
 import numpy as np
+from mediapipe.python.solutions.pose import PoseLandmark
 
-mp_pose = mp.solutions.pose
-pose = mp_pose.Pose()
-
-def get_pose_landmarks(frame):
-    """Extracts pose landmarks from the frame.
+def get_pose_landmarks(frame, pose_processor):
+    """
+    Extracts pose landmarks from the frame using a provided pose processor.
     Args:
         frame (np.array): BGR image.
-
+        pose_processor: Initialized MediaPipe Pose object.
     Returns:
-        np.array or None: Array of landmark (x, y, z) tuples or None.
+        MediaPipe pose landmarks result object or None.
     """
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    result = pose.process(rgb)
-    if result.pose_landmarks:
-        return np.array([(lm.x, lm.y, lm.z) for lm in result.pose_landmarks.landmark])
-    return None
+    result = pose_processor.process(rgb)
+    return result.pose_landmarks
 
-def get_landmark_y(landmarks, frame, landmark_id):
-    """Converts landmark y-position to pixel space.
+def get_landmark_center(landmarks, frame, landmark_ids):
+    """
+    Gets the center (x, y) pixel coordinate of a list of landmarks.
     Args:
-        landmarks (np.array): Array of pose landmarks.
+        landmarks: MediaPipe pose landmarks object.
         frame (np.array): Image frame.
-        landmark_id (PoseLandmark): ID of the landmark.
-
+        landmark_ids (list): List of PoseLandmark IDs.
     Returns:
-        int: Y coordinate in pixels.
+        tuple (int, int) or None: (x, y) coordinate in pixels or None.
     """
-    return int(landmarks[landmark_id.value][1] * frame.shape[0])
+    if landmarks is None:
+        return None
+    
+    points = []
+    h, w, _ = frame.shape
+    for lm_id in landmark_ids:
+        lm = landmarks.landmark[lm_id]
+        if lm.visibility > 0.5: # Only consider visible landmarks
+            points.append((int(lm.x * w), int(lm.y * h)))
 
-def draw_lines(frame, pre_start_y, start_y, state):
-    """Draws horizontal lines and status text.
-    Args:
-        frame (np.array): Image frame.
-        pre_start_y (int): Y position for the pre-start line.
-        start_y (int): Y position for the start line.
-        state (str): State label to show on frame.
+    if not points:
+        return None
+        
+    center = np.mean(points, axis=0).astype(int)
+    return tuple(center)
+
+def transform_point(point, homography_matrix):
     """
-    cv2.line(frame, (0, pre_start_y), (frame.shape[1], pre_start_y), (255, 0, 0), 2)
-    cv2.line(frame, (0, start_y), (frame.shape[1], start_y), (0, 255, 0), 2)
-    cv2.putText(frame, f'State: {state}', (10, 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+    Transforms a single (x, y) point using the homography matrix.
+    Args:
+        point (tuple): (x, y) coordinate.
+        homography_matrix (np.array): The 3x3 homography matrix.
+    Returns:
+        tuple or None: Transformed (x, y) coordinate or None.
+    """
+    if point is None:
+        return None
+    # cv2.perspectiveTransform expects a 3D array: (1, N, 2)
+    point_to_transform = np.float32([[point]])
+    transformed_point = cv2.perspectiveTransform(point_to_transform, homography_matrix)
+    return transformed_point[0][0]

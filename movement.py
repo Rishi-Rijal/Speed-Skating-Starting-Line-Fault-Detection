@@ -1,65 +1,51 @@
 import cv2
-import mediapipe as mp
 import numpy as np
+import mediapipe as mp
 
-mp_pose = mp.solutions.pose
-pose = mp_pose.Pose()
 mp_drawing = mp.solutions.drawing_utils
+mp_pose = mp.solutions.pose
 
-# Key landmarks to track for full-body mode
 FULL_BODY_LANDMARKS = [
-    mp_pose.PoseLandmark.LEFT_HIP,
-    mp_pose.PoseLandmark.RIGHT_HIP,
-    mp_pose.PoseLandmark.LEFT_KNEE,
-    mp_pose.PoseLandmark.RIGHT_KNEE,
-    mp_pose.PoseLandmark.LEFT_ANKLE,
-    mp_pose.PoseLandmark.RIGHT_ANKLE,
-    mp_pose.PoseLandmark.LEFT_SHOULDER,
-    mp_pose.PoseLandmark.RIGHT_SHOULDER,
+    mp_pose.PoseLandmark.LEFT_HIP, mp_pose.PoseLandmark.RIGHT_HIP,
+    mp_pose.PoseLandmark.LEFT_KNEE, mp_pose.PoseLandmark.RIGHT_KNEE,
+    mp_pose.PoseLandmark.LEFT_ANKLE, mp_pose.PoseLandmark.RIGHT_ANKLE,
+    mp_pose.PoseLandmark.LEFT_SHOULDER, mp_pose.PoseLandmark.RIGHT_SHOULDER,
     mp_pose.PoseLandmark.NOSE
 ]
 
-def isMovement(openCVFrame, landMarks: list, movements: list, movementThreshold: float = 0.02, fullBody: bool = False) -> bool:
-    """Detects significant movement using pose landmarks across frames.
-
-    Args:
-        openCVFrame (np.array): Current frame in BGR format.
-        landMarks (list): History of landmark arrays from previous frames.
-        movements (list): Buffer to store average movement values.
-        movementThreshold (float): Threshold to classify significant movement.
-        fullBody (bool): Whether to use selected landmark comparison.
-
-    Returns:
-        bool: True if movement exceeds threshold, else False.
-    """
-    RGBFrame = cv2.cvtColor(openCVFrame, cv2.COLOR_BGR2RGB)
-    result = pose.process(RGBFrame)
+def is_movement(frame, pose_processor, landmark_history: list, movement_history: list, movement_threshold: float) -> bool:
+    """Detects significant movement using pose landmarks across frames."""
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    result = pose_processor.process(rgb_frame)
 
     if not result.pose_landmarks:
         return False
 
-    mp_drawing.draw_landmarks(openCVFrame, result.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+    mp_drawing.draw_landmarks(frame, result.pose_landmarks, mp_pose.POSE_CONNECTIONS)
 
-    allLandmarks = np.array([
-        (lm.x, lm.y, lm.z) for lm in result.pose_landmarks.landmark
-    ])
+    current_landmarks = np.array([(lm.x, lm.y, lm.z, lm.visibility) for lm in result.pose_landmarks.landmark])
+    selected_landmarks = np.array([current_landmarks[lm.value][:2] for lm in FULL_BODY_LANDMARKS]) # Only use x, y for 2D movement
 
-    selectedLandmarks = np.array([allLandmarks[lm.value] for lm in FULL_BODY_LANDMARKS]) if fullBody else np.array([allLandmarks[mp_pose.PoseLandmark.NOSE.value]])
+    movement_detected = False
+    if landmark_history:
+        prev_landmarks = landmark_history[0] # Compare with the most recent frame
+        prev_selected = np.array([prev_landmarks[lm.value][:2] for lm in FULL_BODY_LANDMARKS])
+        
+        # Calculate Euclidean distance for each landmark
+        curr_movement = np.linalg.norm(selected_landmarks - prev_selected, axis=1).mean()
+        movement_history.append(curr_movement)
+        if len(movement_history) > 5:
+            movement_history.pop(0)
 
-    for index, landmark in enumerate(landMarks):
-        if landmark is not None:
-            prev = np.array([landmark[lm.value] for lm in FULL_BODY_LANDMARKS]) if fullBody else np.array([landmark[mp_pose.PoseLandmark.NOSE.value]])
-            currMovement = np.linalg.norm(selectedLandmarks - prev, axis=1).mean()
-            movements[index] = currMovement
+    # Update landmark history
+    landmark_history.insert(0, current_landmarks)
+    if len(landmark_history) > 5:
+        landmark_history.pop()
 
-    if len(landMarks) >= 5:
-        landMarks.pop()
-    landMarks.insert(0, allLandmarks)
+    # Check for significant movement in recent history
+    if any(m > movement_threshold for m in movement_history):
+        cv2.putText(frame, 'MOVEMENT!', (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                    1, (0, 0, 255), 2, cv2.LINE_AA)
+        movement_detected = True
 
-    for movement in movements:
-        if movement > movementThreshold:
-            cv2.putText(openCVFrame, 'Significant Movement!', (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                        1, (0, 255, 0), 2, cv2.LINE_AA)
-            return True
-
-    return False
+    return movement_detected

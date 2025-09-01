@@ -1,0 +1,6 @@
+{
+    "preStartMin": 180,
+    "preStartMax": 220,
+    "startLine": 400,
+    "threshold": 0.02
+}

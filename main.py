@@ -2,133 +2,142 @@ import cv2
 import numpy as np
 import mediapipe as mp
 import time
+import json
 import pygame
-from movement import isMovement
-from utils import draw_lines, get_pose_landmarks, get_landmark_y
 
-# Constants
-PRE_START_Y_MIN = 100
-PRE_START_Y_MAX = 300
-START_LINE_Y = 400
-IMAGINARY_START_LINE_OFFSET = 50
-MOVEMENT_THRESHOLD = 0.02
-READY_HOLD_TIME = 3
-READY_TO_START_DELAY = 5
-START_OK_WINDOW = (3, 4.1)
-GO_SOUND = "Sounds/goSound.mp3"
-READY_SOUND = "Sounds/readySound.mp3"
-FALSE_START_SOUND = "Sounds/falseStartBuzzer.mp3"
-GUN_SOUND = "Sounds/gunSound.mp3"
+from movement import is_movement
+from utils import get_pose_landmarks, get_landmark_center, transform_point
 
-mp_pose = mp.solutions.pose
-pose = mp_pose.Pose()
-
-def get_landmark_y_center(frame, landmark_ids):
-    landmarks = get_pose_landmarks(frame)
-    if landmarks is None:
-        return None
-    y_vals = [get_landmark_y(landmarks, frame, lid) for lid in landmark_ids]
-    return int(np.mean(y_vals))
-
-def preStartingLine(frame, start_time):
-    goToTheStart = False
-    hips_y = get_landmark_y_center(frame, [mp_pose.PoseLandmark.LEFT_HIP, mp_pose.PoseLandmark.RIGHT_HIP])
-    status = "Not Ready"
-
-    if hips_y is None:
-        return None, None
-
-    if PRE_START_Y_MIN < hips_y < PRE_START_Y_MAX:
-        if start_time is None:
-            start_time = time.time()
-        elapsed = time.time() - start_time
-        if elapsed >= 3:
-            status = "Ready"
-            goToTheStart = True
-    else:
-        start_time = None
-
-    draw_lines(frame, PRE_START_Y_MIN, PRE_START_Y_MAX, status)
-    print(hips_y)
-    return start_time, goToTheStart
-
-def crossedLine(frame):
-    ankles_y = get_landmark_y_center(frame, [mp_pose.PoseLandmark.LEFT_ANKLE, mp_pose.PoseLandmark.RIGHT_ANKLE])
-    return ankles_y is not None and ankles_y > START_LINE_Y
-
-def isReady(frame):
-    hips_y = get_landmark_y_center(frame, [mp_pose.PoseLandmark.LEFT_HIP, mp_pose.PoseLandmark.RIGHT_HIP])
-    if hips_y is None:
-        return False
-    imaginary_line = START_LINE_Y - 50
-    draw_lines(frame, imaginary_line, START_LINE_Y, "")
-    return imaginary_line <= hips_y <= START_LINE_Y and not crossedLine(frame)
-
-def playsound(filename):
+# --- Configuration & Setup ---
+def load_config():
+    """Loads settings from config.json"""
     try:
-        pygame.mixer.init()
-        pygame.mixer.music.load(filename)
-        pygame.mixer.music.play()
-    except Exception as e:
-        print(f"Error playing sound {filename}: {e}")
+        with open("config.json", "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print("Error: config.json not found! Using default values.")
+        return {
+            "preStartMin": 180, "preStartMax": 220,
+            "startLine": 400, "threshold": 0.02
+        }
+
+def load_homography_matrix(path='homography_matrix.npy'):
+    """Loads the homography matrix."""
+    try:
+        return np.load(path)
+    except FileNotFoundError:
+        print(f"Error: Homography matrix '{path}' not found!")
+        print("Please run setup_homography.py first to create it.")
+        return None
 
 def main():
-    cap = cv2.VideoCapture(1)
-    landMarks = []
-    movements = [0] * 5
+    # Load configuration and homography
+    config = load_config()
+    H = load_homography_matrix()
+    if H is None:
+        return
 
-    TpreStart = None
-    canLeavePreStartLine = True
-    TSinceGoToStart = None
-    crossedTooEarly = False
-    readySoundHeard = False
-    TSinceReadySound = None
-    falseStartOnce = False
-    gameStarted = False
+    # Initialize Pygame Mixer for sound
+    pygame.mixer.init()
+    
+
+    # Initialize MediaPipe Pose
+    mp_pose = mp.solutions.pose
+    pose_processor = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+
+    # Video Capture
+    cap = cv2.VideoCapture(0) 
+
+    # State machine and timing variables
+    state = "WAITING_FOR_SKATER"
+    state_timer = None
+    landmark_history = []
+    movement_history = []
+    
+    # Constants for the map visualization
+    MAP_WIDTH = 1000
+    MAP_HEIGHT = 500
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        isMovement(frame, landMarks, movements, MOVEMENT_THRESHOLD, fullBody=True)
-        draw_lines(frame, PRE_START_Y_MIN, PRE_START_Y_MAX,state="done")
-        imaginary_line = START_LINE_Y - 50
-        draw_lines(frame, imaginary_line, START_LINE_Y, "yayy")
-        TpreStart, canGoToStartLine = preStartingLine(frame, TpreStart)
+        # Get pose landmarks from the current frame
+        landmarks = get_pose_landmarks(frame, pose_processor)
+        
+        # Get the center of the skater's ankles in the original frame
+        ankles_center_orig = get_landmark_center(landmarks, frame, 
+                                            [mp_pose.PoseLandmark.LEFT_ANKLE, mp_pose.PoseLandmark.RIGHT_ANKLE])
 
-        if canGoToStartLine and canLeavePreStartLine:
-            playsound(GO_SOUND)
-            canLeavePreStartLine = False
-            TSinceGoToStart = time.time()
+        # Transform the ankle center to the top-down map view
+        ankles_center_map = transform_point(ankles_center_orig, H)
+        
+        movement = is_movement(frame, pose_processor, landmark_history, movement_history, config['threshold'])
 
-        if TSinceGoToStart:
-            elapsed = time.time() - TSinceGoToStart
+        # --- State Machine Logic ---
+        if ankles_center_map is not None:
+            if state == "WAITING_FOR_SKATER":
+                # Check if skater is in the pre-start zone
+                if config["preStartMin"] < ankles_center_map[1] < config["preStartMax"]:
+                    state = "IN_PRE_START"
+                    state_timer = time.time()
+            
+            elif state == "IN_PRE_START":
+                # Check if skater has held position for 3 seconds
+                if time.time() - state_timer > 3:
+                    # playsound(GO_SOUND) # Example sound
+                    print("STATE CHANGE: Skater can now go to the start line.")
+                    state = "APPROACHING_START"
+                # If skater leaves the zone too early, reset
+                elif not (config["preStartMin"] < ankles_center_map[1] < config["preStartMax"]):
+                    state = "WAITING_FOR_SKATER"
+            
+            elif state == "APPROACHING_START":
+                # Logic for when the skater moves to the start line
+                # For this example, we'll just check if they are near the line
+                ready_zone_y = config["startLine"]
+                if ready_zone_y - 50 < ankles_center_map[1] < ready_zone_y:
+                    print("STATE CHANGE: Skater is set at the start line.")
+                    # playsound(READY_SOUND)
+                    state = "SET"
+                    state_timer = time.time()
+                    movement_history.clear() # Clear movement history before checking for false start
+            
+            elif state == "SET":
+                # Window to wait for the gun (e.g., between 3 and 4.1 seconds)
+                elapsed = time.time() - state_timer
+                if 1 < elapsed < 4: # Shortened window for easier testing
+                    if movement:
+                        print("STATE CHANGE: FALSE START!")
+                        # playsound(FALSE_START_SOUND)
+                        state = "FALSE_START"
+                elif elapsed >= 4:
+                    print("STATE CHANGE: GO!")
+                    # playsound(GUN_SOUND)
+                    state = "RACE_ACTIVE"
 
-            if crossedLine(frame) and not crossedTooEarly and elapsed >= 2:
-                playsound(FALSE_START_SOUND)
-                crossedTooEarly = True
+            # Add logic for FALSE_START and RACE_ACTIVE states if needed
+            
+        # --- Visualization ---
+        # Create a blank image for our top-down map
+        map_view = np.zeros((MAP_HEIGHT, MAP_WIDTH, 3), dtype=np.uint8)
+        # Draw the lines on the map
+        cv2.line(map_view, (0, config["preStartMin"]), (MAP_WIDTH, config["preStartMin"]), (255, 0, 0), 2)
+        cv2.line(map_view, (0, config["preStartMax"]), (MAP_WIDTH, config["preStartMax"]), (255, 0, 0), 2)
+        cv2.line(map_view, (0, config["startLine"]), (MAP_WIDTH, config["startLine"]), (0, 255, 0), 2)
+        
+        # Draw the skater's position on the map
+        if ankles_center_map is not None:
+            cv2.circle(map_view, tuple(ankles_center_map.astype(int)), 10, (0, 255, 255), -1)
 
-            if elapsed >= 5 and isReady(frame) and not readySoundHeard:
-                playsound(READY_SOUND)
-                readySoundHeard = True
-                TSinceReadySound = time.time()
+        # Display the state on the main video frame
+        cv2.putText(frame, f'State: {state}', (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        if TSinceReadySound:
-            start_elapsed = time.time() - TSinceReadySound
-            startOK = 3 <= start_elapsed <= 4.1
+        cv2.imshow('Live Camera View', frame)
+        cv2.imshow('Top-Down Map View', map_view)
 
-            if startOK and not falseStartOnce:
-                if isMovement(frame, landMarks, movements, MOVEMENT_THRESHOLD, fullBody=True):
-                    playsound(FALSE_START_SOUND)
-                    falseStartOnce = True
-
-            if not falseStartOnce and start_elapsed > 4.1 and not gameStarted:
-                playsound(GUN_SOUND)
-                gameStarted = True
-
-        cv2.imshow('Speed Skating Full-Body Detection', frame)
-        if cv2.waitKey(1) & 0xFF == 27:
+        if cv2.waitKey(1) & 0xFF == 27: # Press ESC to quit
             break
 
     cap.release()

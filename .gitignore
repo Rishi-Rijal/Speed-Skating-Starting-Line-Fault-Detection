@@ -2,4 +2,4 @@ my_env/
 __pycache__/
 *.py[cod]
 homography_matrix.npy
-speed_skating.jpeg
+speed-skating.jpeg

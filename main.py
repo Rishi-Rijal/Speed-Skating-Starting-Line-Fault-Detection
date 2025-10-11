@@ -115,7 +115,7 @@ def main():
     mp_pose = mp.solutions.pose
     pose_processor = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
-    cap = cv2.VideoCapture(4)
+    cap = cv2.VideoCapture(0)
 
     # FSM
     state = "WAITING_FOR_SKATER"  # Skaters behind blue line

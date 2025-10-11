@@ -10,8 +10,8 @@ from utils import get_pose_landmarks, get_landmark_center, transform_point
 from mediapipe.python.solutions.pose import PoseLandmark as PL
 
 # Sound files 
-GO_SOUND = "Sounds/goSound.mp3"               # also used for "Go to the start" for now
-READY_SOUND = "Sounds/readySound.mp3"
+GO_SOUND = "Sounds/go_to_the_start.mp3"               # also used for "Go to the start" for now
+READY_SOUND = "Sounds/ready.mp3"
 FALSE_START_SOUND = "Sounds/falseStartBuzzer.mp3"
 SECOND_SHOT_SOUND = "Sounds/falseStartBuzzer.mp3"  # also reuse if no separate "second shot" file
 

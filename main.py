@@ -43,11 +43,12 @@ def load_config():
         print("Error: config.json not found! Using default values.")
         cfg = {}
 
-    # Defaults
+    # Defaults 
     cfg.setdefault("preStartMin", 180)
     cfg.setdefault("preStartMax", 220)
     cfg.setdefault("startLine", 400)
-    cfg.setdefault("threshold", 0.02)
+    # movement thresholds (these are only used as hints/overlays; MovementGate does the gating)
+    cfg.setdefault("threshold", 0.015)    # per-frame EMA magnitude (from movement.py)
     cfg.setdefault("microTremor", 0.008)
     cfg.setdefault("settleBreathSeconds", 1.0)
     cfg.setdefault("readyAssumeTimeout", 3.0)
@@ -55,13 +56,17 @@ def load_config():
     cfg.setdefault("innerOnLeft", True)
 
     # Orientation controls
-    # 'y' for overhead camera, 'x' for side camera
+    # 'y' for overhead camera (horizontal start line), 'x' for side camera (vertical start line)
     cfg.setdefault("startAxis", "y")
     cfg.setdefault("laneAxis", "x")
 
     # Which side of startLine is LEGAL:
     # "lt" => legal if value < startLine; "gt" => legal if value > startLine
     cfg.setdefault("legal_side", "lt")
+
+    # Motion stability timing after READY (grace) and required moving sustain to count false start
+    cfg.setdefault("readyGraceMs", 300)   # ignore movement for first 300ms after READY finishes
+    cfg.setdefault("needMovingMs", 200)   # must be moving for >= 200ms to trigger "Not stable"
     return cfg
 
 def load_homography_matrix(path='homography_matrix.npy'):
@@ -155,7 +160,6 @@ class AudioGate:
         if self.channel is not None:
             self.channel.set_volume(max(0.0, min(1.0, float(v))))
 
-
 # =========================
 # Geometry / lane helpers
 # =========================
@@ -219,8 +223,8 @@ class LineTouchFilter:
             self.state = raw
             self._pending = None
 
-        return self.state   
-    
+        return self.state
+
 # =========================
 # MovementGate (normalize + EMA + hysteresis + debounce)
 # =========================
@@ -234,12 +238,12 @@ class MovementGate:
     """
     def __init__(
         self,
-        deadband=0.010,      # ignore < 1.0% of body size
-        on_thresh=0.020,     # enter "moving" above 2.0%
-        off_thresh=0.012,    # exit "moving" below 1.2%
+        deadband=0.006,      # ignore < 0.6% of body size
+        on_thresh=0.012,     # enter "moving" above 1.2%
+        off_thresh=0.008,    # exit "moving" below 0.8%
         ema_alpha=0.35,      # 0..1, higher = snappier
-        sustain_on_ms=120,   # require ON for >= 120 ms
-        sustain_off_ms=250   # require OFF for >= 250 ms
+        sustain_on_ms=80,    # require ON for >= 80 ms
+        sustain_off_ms=200   # require OFF for >= 200 ms
     ):
         self.deadband = deadband
         self.on = on_thresh
@@ -337,7 +341,7 @@ def main():
     state = "WAITING_FOR_SKATER"  # Skaters behind blue line
     state_timer = None
 
-    # Movement buffers
+    # Movement buffers for movement.py
     landmark_history = []
     movement_history = []
 
@@ -378,11 +382,16 @@ def main():
     left_touch_f  = LineTouchFilter(config["startLine"], band_units=band_px, press_ms=60, release_ms=80)
     right_touch_f = LineTouchFilter(config["startLine"], band_units=band_px, press_ms=60, release_ms=80)
 
-    # Movement gate
+    # Movement gate (stable boolean)
     movement_gate = MovementGate(
-        deadband=0.010, on_thresh=0.020, off_thresh=0.012,
-        ema_alpha=0.35, sustain_on_ms=120, sustain_off_ms=250
+        deadband=0.006, on_thresh=0.012, off_thresh=0.008,
+        ema_alpha=0.35, sustain_on_ms=80, sustain_off_ms=200
     )
+
+    # Timing helpers around READY
+    ready_grace_s = (config.get("readyGraceMs", 300)) / 1000.0
+    need_moving_s = (config.get("needMovingMs", 200)) / 1000.0
+    moving_on_since = None   # when "moving" became True (perf_counter), else None
 
     # Direction helpers (use loaded config + band)
     def is_illegal(v):
@@ -412,15 +421,22 @@ def main():
             left_hand_map  = get_map_point_for_landmarks(frame, landmarks, [PL.LEFT_WRIST, PL.LEFT_INDEX], H) if landmarks else None
             right_hand_map = get_map_point_for_landmarks(frame, landmarks, [PL.RIGHT_WRIST, PL.RIGHT_INDEX], H) if landmarks else None
 
-            # Movement signal (tremor-tolerant, from your existing function)
+            # movement.py: continuous EMA magnitude (per frame)
             _, smoothed_mag = is_movement(
                 frame, pose_processor, landmark_history, movement_history,
                 config['threshold'], config['microTremor']
             )
 
-            # Normalize motion by body size and gate it
+            # Normalize motion by body size and gate it (stable boolean)
             body_size_px = estimate_body_size(landmarks, frame)
             moving, filtered_mag = movement_gate.sample(smoothed_mag, body_size_px, now)
+
+            # Track moving duration for false-start logic
+            if moving:
+                if moving_on_since is None:
+                    moving_on_since = now
+            else:
+                moving_on_since = None
 
             # Determine lane along lane_axis
             current_lane = None
@@ -463,10 +479,10 @@ def main():
                 if not in_band:
                     state = "WAITING_FOR_SKATER"
                 else:
-                    # Announce lane once
+                    # announce lane once
                     if not played_lane_cue and current_lane:
-                        lane_snd = INNER_LANE_SOUND if current_lane == "inner" else OUTER_LANE_SOUND
-                        #audio_gate.play(lane_snd)
+                        # lane_snd = INNER_LANE_SOUND if current_lane == "inner" else OUTER_LANE_SOUND
+                        # audio_gate.play(lane_snd)
                         played_lane_cue = True
 
                     if (now - state_timer) >= 3.0:
@@ -503,9 +519,10 @@ def main():
             elif state == "AFTER_READY_AUDIO":
                 if audio_gate.is_done():
                     state = "READY_WAIT_POSITION"
-                    state_timer = now   # start the ready-assume timeout now
+                    state_timer = now   # all timing (including grace) starts here
                     touched_line_after_ready = False
                     warned_touch_after_ready = False
+                    moving_on_since = None   # reset movement timer right at READY end
 
             elif state == "READY_WAIT_POSITION":
                 elapsed = now - state_timer
@@ -522,14 +539,27 @@ def main():
                     last_false_reason = "Crossing the line"
                     state = "FALSE_START"
                 else:
-                    # If they keep moving too much until timeout → false start
+                    # Ignore small corrections immediately after READY; then require sustained moving
                     if elapsed > config["readyAssumeTimeout"]:
+                        # after timeout: if still moving, it's "Going down too slow"
                         if moving:
-                            last_false_reason = "Going down too slow"
+                            # require some sustain to avoid flukes
+                            if moving_on_since and (now - moving_on_since) >= need_moving_s:
+                                last_false_reason = "Going down too slow"
+                                offender_lane = offender_lane or current_lane
+                                state = "FALSE_START"
+                    elif elapsed >= ready_grace_s:
+                        # before timeout, after grace — if moving continuously: "Not stable"
+                        if moving_on_since and (now - moving_on_since) >= need_moving_s:
+                            last_false_reason = "Not stable"
                             offender_lane = offender_lane or current_lane
                             state = "FALSE_START"
+                    else:
+                        # still in grace window — do nothing special
+                        pass
+
                     # If stable → enter HOLD
-                    elif not moving:
+                    if state == "READY_WAIT_POSITION" and not moving and elapsed < config["readyAssumeTimeout"]:
                         state = "HOLD_BEFORE_GUN"
                         state_timer = now
                         print("Both skaters appear set. Holding...")
@@ -538,9 +568,11 @@ def main():
                 hold_elapsed = now - state_timer
 
                 if moving:
-                    last_false_reason = "Not stable"
-                    offender_lane = offender_lane or current_lane
-                    state = "FALSE_START"
+                    # moving must be sustained a bit to count
+                    if moving_on_since and (now - moving_on_since) >= need_moving_s:
+                        last_false_reason = "Not stable"
+                        offender_lane = offender_lane or current_lane
+                        state = "FALSE_START"
 
                 elif any_illegal_touch:
                     last_false_reason = "Crossing the line"
@@ -562,19 +594,17 @@ def main():
 
             elif state == "FALSE_START":
                 print("** FALSE START **")
+                # Play whistle, then second shot (or fallback) in sequence
                 if audio_gate.play(WHISTLE_SOUND, interrupt=True):
                     state = "AFTER_WHISTLE_AUDIO"
                 else:
-                    # if whistle can't start (rare), go straight to the buzzer step
                     state = "AFTER_WHISTLE_AUDIO"
 
             elif state == "AFTER_WHISTLE_AUDIO":
                 if audio_gate.is_done():
-                    # now play the false-start signal (second shot, or fallback)
                     if not audio_gate.play(SECOND_SHOT_SOUND, interrupt=True):
                         audio_gate.play(FALSE_START_SOUND, interrupt=True)
                     state = "AFTER_FALSE_AUDIO"
-
 
             elif state == "AFTER_FALSE_AUDIO":
                 if audio_gate.is_done():
@@ -688,12 +718,30 @@ def main():
                 p = tuple(np.array(ankles_center_map, dtype=int))
                 cv2.circle(map_view, p, 10, (0, 255, 255), -1)
 
-            # Optional debug overlays
-            cv2.putText(frame, f'State: {state}', (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.putText(frame, f'Moving: {moving}  Mag(norm): {filtered_mag:.4f}', (10, 105),
+            # some added overlays
+            cv2.putText(frame, f'State: {state}', (10, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            cv2.putText(frame, f'Mag(raw EMA): {float(smoothed_mag):.4f}', (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+            cv2.putText(frame, f'Mag(norm filt): {filtered_mag:.4f}  Moving:{moving}', (10, 86),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
             cv2.putText(frame, f'Illegal touch A/L/R: {int(ankle_illegal)}/{int(left_illegal)}/{int(right_illegal)}',
-                        (10, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+                        (10, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+
+            # Motion meter 
+            meter_x, meter_y, meter_w, meter_h = 10, 140, 260, 14
+            cv2.rectangle(frame, (meter_x, meter_y), (meter_x + meter_w, meter_y + meter_h), (80, 80, 80), 1)
+            # scale filtered_mag into 
+            disp = max(0.0, min(1.0, filtered_mag / 0.04))
+            cv2.rectangle(frame, (meter_x + 1, meter_y + 1),
+                          (meter_x + 1 + int(disp * (meter_w - 2)), meter_y + meter_h - 1),
+                          (0, 200, 255), -1)
+            # thresholds markers
+            on_px  = meter_x + int(min(1.0, 0.012 / 0.04) * meter_w)
+            off_px = meter_x + int(min(1.0, 0.008 / 0.04) * meter_w)
+            cv2.line(frame, (on_px, meter_y), (on_px, meter_y + meter_h), (0, 255, 0), 1)
+            cv2.line(frame, (off_px, meter_y), (off_px, meter_y + meter_h), (0, 150, 150), 1)
+            cv2.putText(frame, "movement meter", (meter_x, meter_y + meter_h + 16),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
 
             cv2.imshow('Live Camera View', frame)
             cv2.imshow('Top-Down Map View', map_view)

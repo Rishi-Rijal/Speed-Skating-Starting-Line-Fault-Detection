@@ -2,13 +2,13 @@
   "preStartMin": 180,
   "preStartMax": 220,
   "startLine": 400,
-  "threshold": 0.1,
+  "threshold": 0.05,
   "microTremor": 0.008,
   "settleBreathSeconds": 1.0,
   "readyAssumeTimeout": 3.0,
   "holdPauseSeconds": 1.1,
   "innerOnLeft": true,
-  "startAxis": "y",
+  "startAxis": "x",
   "laneAxis": "y",
   "legal_side": "lt"
 }

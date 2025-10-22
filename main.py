@@ -10,9 +10,16 @@ from utils import get_pose_landmarks, get_landmark_center, transform_point
 from mediapipe.python.solutions.pose import PoseLandmark as PL
 
 # Sound files 
-GO_SOUND = "Sounds/go_to_the_start.mp3"               # also used for "Go to the start" for now
+GO_TO_THE_START_SOUND = "Sounds/go_to_the_start.mp3"               # also used for "Go to the start" for now
+CROSSING_THE_LINE_SOUND = "Sounds/crossing_the_line.mp3"
+DISQUALIFIED_SOUND = "Sounds/disqualified.mp3"
+DOWN_TOO_SLOW_SOUND = "Sounds/down_too_slow.mp3"
+FALSE_START_SOUND = "Sounds/false_start.mp3"
+BUZZER_SOUND = "Sounds/buzzer.mp3"
+GUN_SHOT_SOUND = "Sounds/gun_shot.mp3"
+INNER_LANE_SOUND = "Sounds/inner_lane.mp3"
+OUTER_LANE_SOUND = "Sounds/outer_lane.mp3"
 READY_SOUND = "Sounds/ready.mp3"
-FALSE_START_SOUND = "Sounds/falseStartBuzzer.mp3"
 SECOND_SHOT_SOUND = "Sounds/falseStartBuzzer.mp3"  # also reuse if no separate "second shot" file
 
 # Mixer cache (module-level, used by AudioGate)
@@ -40,6 +47,18 @@ def load_homography_matrix(path='homography_matrix.npy'):
     except FileNotFoundError:
         print(f"Error: Homography matrix '{path}' not found! Run setup_homography.py.")
         return None
+# Sound reason mapping
+
+def reason_to_sound(reason: str):
+    if reason == "Crossing the line":
+        return CROSSING_THE_LINE_SOUND
+    if reason == "Going down too slow":
+        return DOWN_TOO_SLOW_SOUND
+    if reason == "Not stable":
+        return BUZZER_SOUND
+    # default: no extra reason sound ( already played the false-start shot/buzzer)
+    return None
+
 
 # Non-blocking AudioGate
 class AudioGate:

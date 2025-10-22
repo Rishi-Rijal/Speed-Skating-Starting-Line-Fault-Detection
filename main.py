@@ -52,7 +52,7 @@ def load_config():
     cfg.setdefault("settleBreathSeconds", 1.0)
     cfg.setdefault("readyAssumeTimeout", 3.0)
     cfg.setdefault("holdPauseSeconds", 1.10)
-    cfg.setdefault("innerOnLeft", True)
+    cfg.setdefault("innerOnLeft", False)
 
     # Orientation
     cfg.setdefault("startAxis", "y")   # 'y' overhead, 'x' side camera
@@ -334,7 +334,7 @@ def main():
             if ankles_center_map is not None:
                 lane_val = axis_value(ankles_center_map, lane_axis)
                 axis_len = MAP_WIDTH if lane_axis == "x" else MAP_HEIGHT
-                current_lane = lane_for_axis(lane_val, axis_len=axis_len, inner_on_left=config.get("innerOnLeft", True))
+                current_lane = lane_for_axis(lane_val, axis_len=axis_len, inner_on_left=config.get("innerOnLeft", False))
 
             # Filtered line touches on start axis
             ankle_val = axis_value(ankles_center_map, start_axis)

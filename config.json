@@ -8,7 +8,7 @@
   "readyAssumeTimeout": 3.0,
   "holdPauseSeconds": 1.1,
   "innerOnLeft": true,
-  "startAxis": "x",
+  "startAxis": "y",
   "laneAxis": "y",
   "legal_side": "lt"
 }

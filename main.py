@@ -401,18 +401,18 @@ def main():
                     last_false_reason = ""
                     print('Starter: "Back to lanes — new start."')
 
-            elif state == "AFTER_DQ_AUDIO":
-                if audio_gate.is_done():
-                    # Reset pair count for next pairing after a DQ
-                    false_start_count_by_pair = 0
-                    state = "WAITING_FOR_SKATER"
-                    state_timer = None
-                    movement_history.clear()
-                    landmark_history.clear()
-                    touched_line_after_ready = False
-                    offender_lane = None
-                    last_false_reason = ""
-                    print('Starter: "Back to lanes — new start."')
+        elif state == "AFTER_DQ_AUDIO":
+            if audio_gate.is_done():
+                # Reset pair count for next pairing after a DQ
+                false_start_count_by_pair = 0
+                state = "WAITING_FOR_SKATER"
+                state_timer = None
+                movement_history.clear()
+                landmark_history.clear()
+                touched_line_after_ready = False
+                offender_lane = None
+                last_false_reason = ""
+                print('Starter: "Back to lanes — new start."')
 
         # --- Visualization ---
         map_view = np.zeros((MAP_HEIGHT, MAP_WIDTH, 3), dtype=np.uint8)

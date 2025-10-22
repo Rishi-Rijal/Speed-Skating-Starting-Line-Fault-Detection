@@ -206,7 +206,7 @@ def main():
                 state = "WAITING_FOR_SKATER"
             elif now - state_timer >= 3.0:
                 print('Starter (to skaters): "Go to the start"')
-                audio_gate.play(GO_SOUND)  # non-blocking
+                audio_gate.play(GO_TO_THE_START_SOUND)  
                 state = "SAY_GO_TO_START"  # wait here until sound ends
 
         elif state == "SAY_GO_TO_START":
@@ -227,7 +227,7 @@ def main():
                 # Raise gun, say READY
                 print('Starter: *raises gun*')
                 print('Starter (clearly): "Ready."')
-                audio_gate.play(READY_SOUND)  # non-blocking
+                audio_gate.play(READY_SOUND)  
                 state = "AFTER_READY_AUDIO"   # start the timer only after audio completes
             # If they leave the line, back to approach
             elif ankles_center_map is None or ankles_center_map[1] < (config["startLine"] - 60):
@@ -301,7 +301,7 @@ def main():
             # Hold complete → fire gun
             elif hold_elapsed >= config["holdPauseSeconds"]:
                 print("** GUN FIRED **")
-                audio_gate.play(GO_SOUND)   # non-blocking
+                audio_gate.play(GUN_SHOT_SOUND)   # non-blocking
                 state = "AFTER_GUN_AUDIO"
 
         elif state == "AFTER_GUN_AUDIO":
@@ -314,9 +314,9 @@ def main():
             pass
 
         elif state == "FALSE_START":
-            # Signal with second shot / whistle (non-blocking)
             print("** FALSE START **")
-            audio_gate.play(FALSE_START_SOUND)
+            # Conventionally a second shot/buzzer signals the false start
+            audio_gate.play( FALSE_START_SOUND)
             state = "AFTER_FALSE_AUDIO"
 
         elif state == "AFTER_FALSE_AUDIO":
@@ -325,25 +325,94 @@ def main():
                 lane_txt = offender_lane or (current_lane or "inner/outer")
                 reason = last_false_reason or "Started before gun"
 
-                # Announce reason
+                # Announce in console (your prints)
                 print(f'Starter: "False start, {lane_txt} lane"')
                 print(f'Starter: "{reason}"')
 
-                if false_start_count_by_pair >= 2:
-                    print(f'Starter: "False start, {lane_txt} lane, disqualified"')
-                    print("→ Send the other skater again.")
-                    # Reset pair count for next pairing
-                    false_start_count_by_pair = 0
+                # Play lane call if we have a specific lane
+                lane_sound = None
+                if offender_lane == "inner":
+                    lane_sound = INNER_LANE_SOUND
+                elif offender_lane == "outer":
+                    lane_sound = OUTER_LANE_SOUND
 
-                # Restart from the beginning of the procedure
-                state = "WAITING_FOR_SKATER"
-                state_timer = None
-                movement_history.clear()
-                landmark_history.clear()
-                touched_line_after_ready = False
-                offender_lane = None
-                last_false_reason = ""
-                print('Starter: "Back to lanes — new start."')
+                if lane_sound and audio_gate.play(lane_sound):
+                    state = "AFTER_LANE_AUDIO"
+                else:
+                    # go straight to reason sound
+                    rs = reason_to_sound(reason)
+                    if rs and audio_gate.play(rs):
+                        state = "AFTER_REASON_AUDIO"
+                    else:
+                        # No extra audio; check DQ next
+                        if false_start_count_by_pair >= 2:
+                            print(f'Starter: "False start, {lane_txt} lane, disqualified"')
+                            print("→ Send the other skater again.")
+                            audio_gate.play(DISQUALIFIED_SOUND)
+                            state = "AFTER_DQ_AUDIO"
+                        else:
+                            # reset procedure
+                            state = "WAITING_FOR_SKATER"
+                            state_timer = None
+                            movement_history.clear()
+                            landmark_history.clear()
+                            touched_line_after_ready = False
+                            offender_lane = None
+                            last_false_reason = ""
+                            print('Starter: "Back to lanes — new start."')
+
+        elif state == "AFTER_LANE_AUDIO":
+            if audio_gate.is_done():
+                # then the reason clip (if any)
+                rs = reason_to_sound(last_false_reason)
+                if rs and audio_gate.play(rs):
+                    state = "AFTER_REASON_AUDIO"
+                else:
+                    # No reason clip; move on to DQ check / reset
+                    if false_start_count_by_pair >= 2:
+                        print(f'Starter: "False start, {offender_lane or "inner/outer"} lane, disqualified"')
+                        print("→ Send the other skater again.")
+                        audio_gate.play(DISQUALIFIED_SOUND)
+                        state = "AFTER_DQ_AUDIO"
+                    else:
+                        state = "WAITING_FOR_SKATER"
+                        state_timer = None
+                        movement_history.clear()
+                        landmark_history.clear()
+                        touched_line_after_ready = False
+                        offender_lane = None
+                        last_false_reason = ""
+                        print('Starter: "Back to lanes — new start."')
+
+            elif state == "AFTER_REASON_AUDIO":
+                if audio_gate.is_done():
+                    if false_start_count_by_pair >= 2:
+                        print(f'Starter: "False start, {offender_lane or "inner/outer"} lane, disqualified"')
+                        print("→ Send the other skater again.")
+                        audio_gate.play(DISQUALIFIED_SOUND)
+                        state = "AFTER_DQ_AUDIO"
+                    else:
+                        state = "WAITING_FOR_SKATER"
+                        state_timer = None
+                        movement_history.clear()
+                        landmark_history.clear()
+                        touched_line_after_ready = False
+                        offender_lane = None
+                        last_false_reason = ""
+                        print('Starter: "Back to lanes — new start."')
+
+                elif state == "AFTER_DQ_AUDIO":
+                    if audio_gate.is_done():
+                        # Reset pair count for next pairing after a DQ
+                        false_start_count_by_pair = 0
+                        state = "WAITING_FOR_SKATER"
+                        state_timer = None
+                        movement_history.clear()
+                        landmark_history.clear()
+                        touched_line_after_ready = False
+                        offender_lane = None
+                        last_false_reason = ""
+                        print('Starter: "Back to lanes — new start."')
 
         # --- Visualization ---
         map_view = np.zeros((MAP_HEIGHT, MAP_WIDTH, 3), dtype=np.uint8)

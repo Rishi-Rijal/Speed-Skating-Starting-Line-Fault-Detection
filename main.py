@@ -175,7 +175,7 @@ def lane_for_axis(val, axis_len=1000, inner_on_left=True):
         return None
     mid = axis_len / 2
     on_low_side = val < mid
-    return ("inner" if on_low_side else "outer") if inner_on_left else ("outer" if on_low_side else "inner")
+    return ("outer" if on_low_side else "inner") if inner_on_left else ("inner" if on_low_side else "outer")
 
 # =========================
 # LineTouchFilter (hysteresis + debounce)

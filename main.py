@@ -97,7 +97,7 @@ class AudioGate:
                 _sound_cache[path] = snd
             if self.channel is None:
                 self.channel = pygame.mixer.find_channel(True)
-            # Optional: don't stomp if busy — comment out if you want to interrupt
+            # Don't stomp an ongoing clip (comment this out to allow interrupting)
             if self.channel.get_busy():
                 return False
             self.channel.play(snd)
@@ -137,9 +137,6 @@ def lane_for_x(x_map, map_width=1000, inner_on_left=True):
 class LineTouchFilter:
     """
     Schmitt-trigger + debounce for touching a horizontal line (y = line_y).
-    band_px: hysteresis half-band in pixels (typ 3–5)
-    press_ms: how long a 'touch' must persist before we accept it
-    release_ms: how long 'not-touch' must persist before we clear it
     """
     def __init__(self, line_y: float, band_px: float = 4.0, press_ms: int = 60, release_ms: int = 80):
         self.line_y = float(line_y)
@@ -310,6 +307,10 @@ def main():
     offender_lane = None
     last_false_reason = ""
 
+    # NEW: cues & warnings
+    played_lane_cue = False
+    warned_touch_after_ready = False
+
     # Audio
     audio_gate = AudioGate()
 
@@ -376,16 +377,26 @@ def main():
                     touched_line_after_ready = False
                     offender_lane = None
                     last_false_reason = ""
+                    played_lane_cue = False
+                    warned_touch_after_ready = False
                     print("Skaters behind blue line. Waiting...")
 
             elif state == "IN_PRE_START":
                 # Hold behind the blue line for ~3s
-                if ankles_center_map is None or not (config["preStartMin"] < ankles_center_map[1] < config["preStartMax"]):
+                in_band = (ankles_center_map is not None) and (config["preStartMin"] < ankles_center_map[1] < config["preStartMax"])
+                if not in_band:
                     state = "WAITING_FOR_SKATER"
-                elif (now - state_timer) >= 3.0:
-                    print('Starter (to skaters): "Go to the start"')
-                    audio_gate.play(GO_TO_THE_START_SOUND)
-                    state = "SAY_GO_TO_START"  # wait here until sound ends
+                else:
+                    # NEW: announce lane once so athletes/spectators know who's where
+                    if not played_lane_cue and current_lane:
+                        lane_snd = INNER_LANE_SOUND if current_lane == "inner" else OUTER_LANE_SOUND
+                        audio_gate.play(lane_snd)
+                        played_lane_cue = True
+
+                    if (now - state_timer) >= 3.0:
+                        print('Starter (to skaters): "Go to the start"')
+                        audio_gate.play(GO_TO_THE_START_SOUND)
+                        state = "SAY_GO_TO_START"  # wait here until sound ends
 
             elif state == "SAY_GO_TO_START":
                 if audio_gate.is_done():
@@ -416,13 +427,19 @@ def main():
                     state = "READY_WAIT_POSITION"
                     state_timer = now   # start the ready-assume timeout now
                     touched_line_after_ready = False
+                    warned_touch_after_ready = False
 
             elif state == "READY_WAIT_POSITION":
                 # They should assume the start within timeout
                 elapsed = now - state_timer
 
                 # Check illegal line touch after READY (hands or feet touching/crossing)
-                if ankle_touching or left_touching or right_touching:
+                if (ankle_touching or left_touching or right_touching):
+                    # NEW: quick warning beep the first time they touch after READY
+                    if not warned_touch_after_ready:
+                        audio_gate.play(BUZZER_SOUND)
+                        warned_touch_after_ready = True
+
                     touched_line_after_ready = True
                     offender_lane = offender_lane or current_lane
 
@@ -473,6 +490,7 @@ def main():
 
             elif state == "FALSE_START":
                 print("** FALSE START **")
+                # Headline signal
                 if not audio_gate.play(SECOND_SHOT_SOUND):
                     audio_gate.play(FALSE_START_SOUND)
                 state = "AFTER_FALSE_AUDIO"
@@ -508,7 +526,7 @@ def main():
                                 audio_gate.play(DISQUALIFIED_SOUND)
                                 state = "AFTER_DQ_AUDIO"
                             else:
-                                # reset procedure
+                                # reset procedure (non-DQ) → cue restart
                                 state = "WAITING_FOR_SKATER"
                                 state_timer = None
                                 movement_history.clear()
@@ -516,6 +534,7 @@ def main():
                                 touched_line_after_ready = False
                                 offender_lane = None
                                 last_false_reason = ""
+                                audio_gate.play(GO_TO_THE_START_SOUND)
                                 print('Starter: "Back to lanes — new start."')
 
             elif state == "AFTER_LANE_AUDIO":
@@ -539,6 +558,7 @@ def main():
                             touched_line_after_ready = False
                             offender_lane = None
                             last_false_reason = ""
+                            audio_gate.play(GO_TO_THE_START_SOUND)
                             print('Starter: "Back to lanes — new start."')
 
             elif state == "AFTER_REASON_AUDIO":
@@ -556,6 +576,7 @@ def main():
                         touched_line_after_ready = False
                         offender_lane = None
                         last_false_reason = ""
+                        audio_gate.play(GO_TO_THE_START_SOUND)
                         print('Starter: "Back to lanes — new start."')
 
             elif state == "AFTER_DQ_AUDIO":

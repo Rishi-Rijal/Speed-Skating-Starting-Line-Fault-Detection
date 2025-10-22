@@ -23,6 +23,7 @@ GUN_SHOT_SOUND = "Sounds/gun_shoot.mp3"
 INNER_LANE_SOUND = "Sounds/inner_lane.mp3"
 OUTER_LANE_SOUND = "Sounds/outer_lane.mp3"
 READY_SOUND = "Sounds/ready.mp3"
+WHISTLE_SOUND = "Sounds/whistle.mp3"
 SECOND_SHOT_SOUND = "Sounds/falseStartBuzzer.mp3"
 
 # =========================
@@ -83,51 +84,77 @@ def reason_to_sound(reason: str):
     return None
 
 # =========================
-# Non-blocking AudioGate
+# AudioGate(for sound)
 # =========================
 class AudioGate:
     """
     Non-blocking audio manager:
-      - play(path): start sound asynchronously on a dedicated channel
-      - is_done(): True once the sound finished (or if audio failed)
+      - play(path, interrupt=False): start sound asynchronously
+      - is_done(): True once the sound finished (robust; uses ends_at guard)
       - stop(): stop current sound immediately
+      - set_volume(v): 0.0..1.0
     """
     def __init__(self):
         self.channel = None
+        self.ends_at = 0.0
         self._ensure()
 
     def _ensure(self):
         global _mixer_ready
         if not _mixer_ready:
+            # pre_init helps reduce first-play latency
             pygame.mixer.pre_init(44100, -16, 2, 512)
             pygame.mixer.init()
             _mixer_ready = True
 
-    def play(self, path: str) -> bool:
+    def play(self, path: str, interrupt: bool = False) -> bool:
+        """Play a clip. If interrupt=True, stop any current clip first."""
         try:
             self._ensure()
+            # cache Sound objects to avoid disk I/O every call
             snd = _sound_cache.get(path)
             if snd is None:
                 snd = pygame.mixer.Sound(path)
                 _sound_cache[path] = snd
+
             if self.channel is None:
                 self.channel = pygame.mixer.find_channel(True)
-            # Don't stomp an ongoing clip (comment to allow interrupting)
+
             if self.channel.get_busy():
-                return False
+                if not interrupt:
+                    return False
+                # force-stop current clip before starting the new one
+                self.channel.stop()
+
             self.channel.play(snd)
+            # robust done-check: expected end time
+            self.ends_at = time.perf_counter() + snd.get_length()
             return True
         except Exception as e:
             print(f"[Sound error] {e}")
             self.channel = None
+            self.ends_at = 0.0
             return False
 
     def is_done(self) -> bool:
-        return (self.channel is None) or (not self.channel.get_busy())
+        """True when channel is idle AND the expected end time has passed."""
+        chan_free = (self.channel is None) or (not self.channel.get_busy())
+        time_passed = time.perf_counter() >= self.ends_at
+        return chan_free and time_passed
 
     def stop(self):
+        """Stop any current clip immediately."""
         if self.channel is not None:
             self.channel.stop()
+        self.ends_at = 0.0
+
+    def set_volume(self, v: float):
+        """Set output volume 0.0..1.0 for this channel."""
+        if self.channel is None:
+            self.channel = pygame.mixer.find_channel(True)
+        if self.channel is not None:
+            self.channel.set_volume(max(0.0, min(1.0, float(v))))
+
 
 # =========================
 # Geometry / lane helpers
@@ -439,7 +466,7 @@ def main():
                     # Announce lane once
                     if not played_lane_cue and current_lane:
                         lane_snd = INNER_LANE_SOUND if current_lane == "inner" else OUTER_LANE_SOUND
-                        audio_gate.play(lane_snd)
+                        #audio_gate.play(lane_snd)
                         played_lane_cue = True
 
                     if (now - state_timer) >= 3.0:
@@ -535,9 +562,19 @@ def main():
 
             elif state == "FALSE_START":
                 print("** FALSE START **")
-                if not audio_gate.play(SECOND_SHOT_SOUND):
-                    audio_gate.play(FALSE_START_SOUND)
-                state = "AFTER_FALSE_AUDIO"
+                if audio_gate.play(WHISTLE_SOUND, interrupt=True):
+                    state = "AFTER_WHISTLE_AUDIO"
+                else:
+                    # if whistle can't start (rare), go straight to the buzzer step
+                    state = "AFTER_WHISTLE_AUDIO"
+
+            elif state == "AFTER_WHISTLE_AUDIO":
+                if audio_gate.is_done():
+                    # now play the false-start signal (second shot, or fallback)
+                    if not audio_gate.play(SECOND_SHOT_SOUND, interrupt=True):
+                        audio_gate.play(FALSE_START_SOUND, interrupt=True)
+                    state = "AFTER_FALSE_AUDIO"
+
 
             elif state == "AFTER_FALSE_AUDIO":
                 if audio_gate.is_done():

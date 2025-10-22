@@ -19,7 +19,7 @@ DISQUALIFIED_SOUND = "Sounds/disqualified.mp3"
 DOWN_TOO_SLOW_SOUND = "Sounds/down_too_slow.mp3"
 FALSE_START_SOUND = "Sounds/false_start.mp3"
 BUZZER_SOUND = "Sounds/buzzer.mp3"
-GUN_SHOT_SOUND = "Sounds/gun_shot.mp3"
+GUN_SHOT_SOUND = "Sounds/gun_shoot.mp3"   
 INNER_LANE_SOUND = "Sounds/inner_lane.mp3"
 OUTER_LANE_SOUND = "Sounds/outer_lane.mp3"
 READY_SOUND = "Sounds/ready.mp3"
@@ -42,7 +42,7 @@ def load_config():
         print("Error: config.json not found! Using default values.")
         cfg = {}
 
-    # Defaults (incl. new axis-aware settings)
+    # Defaults
     cfg.setdefault("preStartMin", 180)
     cfg.setdefault("preStartMax", 220)
     cfg.setdefault("startLine", 400)
@@ -53,11 +53,14 @@ def load_config():
     cfg.setdefault("holdPauseSeconds", 1.10)
     cfg.setdefault("innerOnLeft", True)
 
-    # NEW: orientation controls
-    # - startAxis: 'y' (top camera; horizontal start) or 'x' (side camera; vertical start)
-    # - laneAxis:  'x' or 'y' — which axis splits inner/outer
+    # Orientation controls
+    # 'y' for overhead camera, 'x' for side camera
     cfg.setdefault("startAxis", "y")
     cfg.setdefault("laneAxis", "x")
+
+    # Which side of startLine is LEGAL:
+    # "lt" => legal if value < startLine; "gt" => legal if value > startLine
+    cfg.setdefault("legal_side", "lt")
     return cfg
 
 def load_homography_matrix(path='homography_matrix.npy'):
@@ -152,7 +155,8 @@ def lane_for_axis(val, axis_len=1000, inner_on_left=True):
 # =========================
 class LineTouchFilter:
     """
-    Schmitt-trigger + debounce for touching a line along one axis.
+    Schmitt-trigger + debounce for entering beyond a 1D line (along one axis).
+    .sample() returns True when sustained beyond the line, False when sustained back.
     """
     def __init__(self, line_pos: float, band_units: float = 4.0, press_ms: int = 60, release_ms: int = 80):
         self.line = float(line_pos)
@@ -163,8 +167,9 @@ class LineTouchFilter:
         self._pending = None  # (target_state, t_start)
 
     def _schmitt(self, v: float | None) -> bool:
+        # Treat missing value as NOT touching (prevents sticky True)
         if v is None:
-            return self.state
+            return False
         if not self.state:
             return v >= (self.line + self.band)
         else:
@@ -187,8 +192,8 @@ class LineTouchFilter:
             self.state = raw
             self._pending = None
 
-        return self.state
-
+        return self.state   
+    
 # =========================
 # MovementGate (normalize + EMA + hysteresis + debounce)
 # =========================
@@ -333,19 +338,33 @@ def main():
     # ========= Axis-aware setup =========
     start_axis = (config.get("startAxis") or "y").lower()
     lane_axis  = (config.get("laneAxis")  or "x").lower()
+    legal_side = (config.get("legal_side") or "lt").lower()  # 'lt' or 'gt'
     assert start_axis in ("x", "y"), "startAxis must be 'x' or 'y'"
     assert lane_axis  in ("x", "y"), "laneAxis must be 'x' or 'y'"
+    assert legal_side in ("lt", "gt"), "legal_side must be 'lt' or 'gt'"
+
+    # Hysteresis width used for directional legality checks
+    band_px = 4
 
     # Filters: line touch (ankles + hands) ON THE START AXIS
-    ankle_touch_f = LineTouchFilter(config["startLine"], band_units=4, press_ms=60, release_ms=80)
-    left_touch_f  = LineTouchFilter(config["startLine"], band_units=4, press_ms=60, release_ms=80)
-    right_touch_f = LineTouchFilter(config["startLine"], band_units=4, press_ms=60, release_ms=80)
+    ankle_touch_f = LineTouchFilter(config["startLine"], band_units=band_px, press_ms=60, release_ms=80)
+    left_touch_f  = LineTouchFilter(config["startLine"], band_units=band_px, press_ms=60, release_ms=80)
+    right_touch_f = LineTouchFilter(config["startLine"], band_units=band_px, press_ms=60, release_ms=80)
 
     # Movement gate
     movement_gate = MovementGate(
         deadband=0.010, on_thresh=0.020, off_thresh=0.012,
         ema_alpha=0.35, sustain_on_ms=120, sustain_off_ms=250
     )
+
+    # Direction helpers (use loaded config + band)
+    def is_illegal(v):
+        if v is None:
+            return False
+        if legal_side == "lt":          # legal is < startLine
+            return v >= (config["startLine"] + band_px)
+        else:                           # legal is > startLine
+            return v <= (config["startLine"] - band_px)
 
     try:
         while cap.isOpened():
@@ -385,17 +404,21 @@ def main():
 
             # Filtered line touches on the START AXIS
             ankle_val = axis_value(ankles_center_map, start_axis)
-            left_val  = axis_value(left_hand_map, start_axis)
+            left_val  = axis_value(left_hand_map,  start_axis)
             right_val = axis_value(right_hand_map, start_axis)
 
             ankle_touching = ankle_touch_f.sample(ankle_val, now)
-            left_touching  = left_touch_f.sample(left_val, now)
+            left_touching  = left_touch_f.sample(left_val,  now)
             right_touching = right_touch_f.sample(right_val, now)
+
+            # Direction-aware illegal touch (must be touching AND on the wrong side)
+            ankle_illegal = ankle_touching and is_illegal(ankle_val)
+            left_illegal  = left_touching  and is_illegal(left_val)
+            right_illegal = right_touching and is_illegal(right_val)
+            any_illegal_touch = ankle_illegal or left_illegal or right_illegal
 
             # --- STATE MACHINE ---
             if state == "WAITING_FOR_SKATER":
-                # Expect skaters in pre-start zone (behind blue band) — bands are along START AXIS
-                # So the "preStartMin/Max" are compared along start_axis.
                 in_band_val = axis_value(ankles_center_map, start_axis)
                 if (in_band_val is not None) and (config["preStartMin"] < in_band_val < config["preStartMax"]):
                     state = "IN_PRE_START"
@@ -413,7 +436,7 @@ def main():
                 if not in_band:
                     state = "WAITING_FOR_SKATER"
                 else:
-                    # Announce lane once so athletes/spectators know who's where
+                    # Announce lane once
                     if not played_lane_cue and current_lane:
                         lane_snd = INNER_LANE_SOUND if current_lane == "inner" else OUTER_LANE_SOUND
                         audio_gate.play(lane_snd)
@@ -461,7 +484,7 @@ def main():
                 elapsed = now - state_timer
 
                 # Illegal touch after READY?
-                if (ankle_touching or left_touching or right_touching):
+                if any_illegal_touch:
                     if not warned_touch_after_ready:
                         audio_gate.play(BUZZER_SOUND)  # quick warning
                         warned_touch_after_ready = True
@@ -492,7 +515,7 @@ def main():
                     offender_lane = offender_lane or current_lane
                     state = "FALSE_START"
 
-                elif ankle_touching or left_touching or right_touching:
+                elif any_illegal_touch:
                     last_false_reason = "Crossing the line"
                     offender_lane = offender_lane or current_lane
                     state = "FALSE_START"
@@ -507,6 +530,7 @@ def main():
                     state = "RACE_ACTIVE"
 
             elif state == "RACE_ACTIVE":
+                # race logic could go here; do not spam sounds
                 pass
 
             elif state == "FALSE_START":
@@ -631,7 +655,7 @@ def main():
             cv2.putText(frame, f'State: {state}', (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             cv2.putText(frame, f'Moving: {moving}  Mag(norm): {filtered_mag:.4f}', (10, 105),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
-            cv2.putText(frame, f'Touch(startAxis {start_axis.upper()}) A/L/R: {int(ankle_touching)}/{int(left_touching)}/{int(right_touching)}',
+            cv2.putText(frame, f'Illegal touch A/L/R: {int(ankle_illegal)}/{int(left_illegal)}/{int(right_illegal)}',
                         (10, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
             cv2.imshow('Live Camera View', frame)

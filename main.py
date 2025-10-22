@@ -47,8 +47,8 @@ def load_config():
     cfg.setdefault("preStartMin", 180)
     cfg.setdefault("preStartMax", 220)
     cfg.setdefault("startLine", 400)
-    cfg.setdefault("threshold", 0.015)   # movement.py "significant" threshold
-    cfg.setdefault("microTremor", 0.008) # movement.py tremor floor
+    cfg.setdefault("threshold", 0.015)    # movement.py "significant" threshold (strong)
+    cfg.setdefault("microTremor", 0.008)  # movement.py tremor floor (baseline)
     cfg.setdefault("settleBreathSeconds", 1.0)
     cfg.setdefault("readyAssumeTimeout", 3.0)
     cfg.setdefault("holdPauseSeconds", 1.10)
@@ -63,7 +63,11 @@ def load_config():
 
     # Movement timing guards (around READY/HOLD)
     cfg.setdefault("readyGraceMs", 300)   # ignore movement for first 300ms after READY finishes
-    cfg.setdefault("needMovingMs", 200)   # require continuous significant movement for >= 200ms to count
+    cfg.setdefault("needMovingMs", 200)   # require continuous movement for >= 200ms to count
+
+    # Two-level movement thresholds
+    cfg.setdefault("weakFactor", 1.35)    # weak movement = EMA > microTremor * weakFactor
+    cfg.setdefault("quietMs", 180)        # must be weak-still for this long to enter HOLD
     return cfg
 
 def load_homography_matrix(path='homography_matrix.npy'):
@@ -174,7 +178,7 @@ class LineTouchFilter:
     Schmitt-trigger + debounce for entering beyond a 1D line (along one axis).
     .sample() returns True when sustained beyond the line, False when sustained back.
     """
-    def __init__(self, line_pos: float, band_units: float = 4.0, press_ms: int = 60, release_ms: int = 80):
+    def __init__(self, line_pos: float, band_units: float = 0.0, press_ms: int = 60, release_ms: int = 80):
         self.line = float(line_pos)
         self.band = float(band_units)
         self.press_s = press_ms / 1000.0
@@ -285,7 +289,13 @@ def main():
     # READY/HOLD movement timing
     ready_grace_s = config.get("readyGraceMs", 300) / 1000.0
     need_moving_s = config.get("needMovingMs", 200) / 1000.0
-    moving_on_since = None  # perf_counter when movement became True
+    quiet_s       = config.get("quietMs", 180) / 1000.0
+    weak_factor   = config.get("weakFactor", 1.35)
+
+    # Movement sustain timers
+    moving_on_since_strong = None  # when strong movement became True
+    moving_on_since_weak   = None  # when weak movement became True
+    still_since_weak       = None  # when weak movement became False
 
     def is_illegal(v):
         if v is None:
@@ -313,21 +323,32 @@ def main():
             left_hand_map  = get_map_point_for_landmarks(frame, landmarks, [PL.LEFT_WRIST, PL.LEFT_INDEX], H) if landmarks else None
             right_hand_map = get_map_point_for_landmarks(frame, landmarks, [PL.RIGHT_WRIST, PL.RIGHT_INDEX], H) if landmarks else None
 
-            # Movement detection
-            # Returns:
-            #   significant_move: boolean (ema > movement_threshold)
-            #   smoothed_mag:     float (EMA over last few frames; unit ~ image fraction)
+            # Movement detection (from movement.py)
             significant_move, smoothed_mag = is_movement(
                 frame, pose_processor, landmark_history, movement_history,
                 config['threshold'], config['microTremor']
             )
 
-            # Maintain a "sustain" timer for movement
-            if significant_move:
-                if moving_on_since is None:
-                    moving_on_since = now
+            # Two-level movement
+            move_strong = bool(significant_move)  # EMA >= threshold
+            move_weak   = bool(smoothed_mag > (config['microTremor'] * weak_factor))  # creeping above tremor
+
+            # Strong sustain
+            if move_strong:
+                if moving_on_since_strong is None:
+                    moving_on_since_strong = now
             else:
-                moving_on_since = None
+                moving_on_since_strong = None
+
+            # Weak sustain + stillness
+            if move_weak:
+                if moving_on_since_weak is None:
+                    moving_on_since_weak = now
+                still_since_weak = None
+            else:
+                moving_on_since_weak = None
+                if still_since_weak is None:
+                    still_since_weak = now
 
             # Lane by lane_axis
             current_lane = None
@@ -372,7 +393,6 @@ def main():
                 else:
                     if not played_lane_cue and current_lane:
                         played_lane_cue = True
-
                     if (now - state_timer) >= 3.0:
                         print('Starter (to skaters): "Go to the start"')
                         audio_gate.play(GO_TO_THE_START_SOUND)
@@ -408,7 +428,10 @@ def main():
                     state_timer = now
                     touched_line_after_ready = False
                     warned_touch_after_ready = False
-                    moving_on_since = None  # reset sustain right as READY finishes
+                    # Reset movement timers exactly when READY completes
+                    moving_on_since_strong = None
+                    moving_on_since_weak   = None
+                    still_since_weak       = None
 
             elif state == "READY_WAIT_POSITION":
                 elapsed = now - state_timer
@@ -425,37 +448,39 @@ def main():
                     last_false_reason = "Crossing the line"
                     state = "FALSE_START"
                 else:
-                    # After READY:
-                    #  1) For the first 'readyGraceMs', ignore movement (athlete settling)
-                    #  2) After grace but before timeout, sustained movement => "Not stable"
-                    #  3) After timeout, sustained movement => "Going down too slow"
-                    if elapsed >= ready_grace_s and moving_on_since and (now - moving_on_since) >= need_moving_s:
-                        if elapsed <= config["readyAssumeTimeout"]:
-                            last_false_reason = "Not stable"
-                            offender_lane = offender_lane or current_lane
-                            state = "FALSE_START"
-                        else:
-                            last_false_reason = "Going down too slow"
-                            offender_lane = offender_lane or current_lane
-                            state = "FALSE_START"
+                    # After the READY grace:
+                    if elapsed >= ready_grace_s:
+                        # 1) Strong, sustained movement → "Not stable" if within timeout; else "Going down too slow"
+                        if moving_on_since_strong and (now - moving_on_since_strong) >= need_moving_s:
+                            if elapsed <= config["readyAssumeTimeout"]:
+                                last_false_reason = "Not stable"
+                                offender_lane = offender_lane or current_lane
+                                state = "FALSE_START"
+                            else:
+                                last_false_reason = "Going down too slow"
+                                offender_lane = offender_lane or current_lane
+                                state = "FALSE_START"
+                        # 2) After timeout, even weak sustained movement counts → "Going down too slow"
+                        elif elapsed > config["readyAssumeTimeout"]:
+                            if moving_on_since_weak and (now - moving_on_since_weak) >= need_moving_s:
+                                last_false_reason = "Going down too slow"
+                                offender_lane = offender_lane or current_lane
+                                state = "FALSE_START"
 
-                    # If stable and within timeout → enter HOLD
-                    elif elapsed < config["readyAssumeTimeout"] and not significant_move:
-                        state = "HOLD_BEFORE_GUN"
-                        state_timer = now
-                        print("Both skaters appear set. Holding...")
+                    # Enter HOLD only if weak-still long enough and still within timeout
+                    if state == "READY_WAIT_POSITION" and elapsed < config["readyAssumeTimeout"]:
+                        if (still_since_weak is not None) and ((now - still_since_weak) >= quiet_s):
+                            state = "HOLD_BEFORE_GUN"
+                            state_timer = now
+                            print("Both skaters appear set. Holding...")
 
             elif state == "HOLD_BEFORE_GUN":
                 hold_elapsed = now - state_timer
 
-                # sustained movement during hold → Not stable
-                if moving_on_since and (now - moving_on_since) >= need_moving_s:
+                # Sustained strong or weak movement during hold → Not stable
+                if (moving_on_since_strong and (now - moving_on_since_strong) >= need_moving_s) or \
+                   (moving_on_since_weak   and (now - moving_on_since_weak)   >= need_moving_s):
                     last_false_reason = "Not stable"
-                    offender_lane = offender_lane or current_lane
-                    state = "FALSE_START"
-
-                elif any_illegal_touch:
-                    last_false_reason = "Crossing the line"
                     offender_lane = offender_lane or current_lane
                     state = "FALSE_START"
 
@@ -594,13 +619,13 @@ def main():
                 cv2.circle(map_view, p, 10, (0, 255, 255), -1)
 
             # Debug overlays (movement.py signal)
-            cv2.putText(frame, f'State: {state}', (10, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-            cv2.putText(frame, f'EMA mag (movement.py): {float(smoothed_mag):.4f}', (10, 60),
+            cv2.putText(frame, f'State: {state}', (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.putText(frame, f'EMA(movement.py): {float(smoothed_mag):.4f}', (10, 54),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
-            cv2.putText(frame, f'Significant move: {bool(moving_on_since is not None)}', (10, 86),
+            cv2.putText(frame, f'strong:{int(move_strong)} weak:{int(move_weak)}', (10, 78),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
             cv2.putText(frame, f'Illegal touch A/L/R: {int(ankle_illegal)}/{int(left_illegal)}/{int(right_illegal)}',
-                        (10, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+                        (10, 102), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
             cv2.imshow('Live Camera View', frame)
             cv2.imshow('Top-Down Map View', map_view)

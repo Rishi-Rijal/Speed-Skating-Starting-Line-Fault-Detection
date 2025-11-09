@@ -9,6 +9,17 @@ import math
 from movement import is_movement
 from utils import get_pose_landmarks, get_landmark_center, transform_point
 from mediapipe.python.solutions.pose import PoseLandmark as PL
+from itertools import cycle
+
+import os, tempfile 
+PUBLISH_DIR = "live"
+os.makedirs(PUBLISH_DIR, exist_ok=True)
+
+
+PUBLISH_DIR = "live"
+
+# one toggler per stream
+_toggles = {"left": cycle(("a", "b")), "right": cycle(("a", "b"))}
 
 # =========================
 # Sound files
@@ -88,6 +99,27 @@ def reason_to_sound(reason: str):
     if reason == "Not stable":
         return BUZZER_SOUND
     return None
+
+
+def publish_frame(name: str, frame):
+    """
+    Ping-pong writer: write to left_a.jpg/left_b.jpg (or right_a/right_b)
+    then update a tiny flag file so the UI knows which one is complete.
+    """
+    os.makedirs(PUBLISH_DIR, exist_ok=True)
+    slot = next(_toggles[name])               # "a" or "b"
+    base = os.path.join(PUBLISH_DIR, f"{name}_{slot}.jpg")
+    ok = cv2.imwrite(base, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    if not ok:
+        return
+    # atomically tell the UI which one to read
+    flag_tmp = os.path.join(PUBLISH_DIR, f".{name}.flag.tmp")
+    flag     = os.path.join(PUBLISH_DIR, f"{name}.flag")
+    with open(flag_tmp, "w", encoding="utf-8") as f:
+        f.write(slot)                          # "a" or "b"
+    os.replace(flag_tmp, flag)                 # atomic for Windows & POSIX
+
+
 
 # =========================
 # AudioGate (non-blocking, interrupt-capable)
@@ -627,8 +659,8 @@ def main():
             cv2.putText(frame, f'Illegal touch A/L/R: {int(ankle_illegal)}/{int(left_illegal)}/{int(right_illegal)}',
                         (10, 102), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
-            cv2.imshow('Live Camera View', frame)
-            cv2.imshow('Top-Down Map View', map_view)
+            publish_frame("left", frame)       # will appear in the left panel in the UI
+            publish_frame("right", map_view)   # will appear in the right panel in the UI
 
             if cv2.waitKey(1) & 0xFF == 27:  # ESC quits
                 break

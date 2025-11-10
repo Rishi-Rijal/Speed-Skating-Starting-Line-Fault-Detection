@@ -217,9 +217,9 @@ class SkatingControlPanel(QWidget):
             r += 1
 
         # geometry
-        self.pre_start_min = QSpinBox(); self.pre_start_min.setRange(1, 500); self.pre_start_min.setValue(180)
-        self.pre_start_max = QSpinBox(); self.pre_start_max.setRange(1, 500); self.pre_start_max.setValue(220)
-        self.start_line    = QSpinBox(); self.start_line.setRange(1, 500);  self.start_line.setValue(400)
+        self.pre_start_min = QSpinBox(); self.pre_start_min.setRange(1, 700); self.pre_start_min.setValue(180)
+        self.pre_start_max = QSpinBox(); self.pre_start_max.setRange(1, 700); self.pre_start_max.setValue(220)
+        self.start_line    = QSpinBox(); self.start_line.setRange(1, 700);  self.start_line.setValue(400)
 
         # thresholds
         self.threshold = QDoubleSpinBox(); self.threshold.setDecimals(3); self.threshold.setSingleStep(0.001); self.threshold.setRange(0.001, 0.1); self.threshold.setValue(0.015)
@@ -363,6 +363,17 @@ class SkatingControlPanel(QWidget):
         self.proc_main.readyReadStandardOutput.connect(self._read_main_stdout)
         self.proc_main.finished.connect(self._main_exited)
         self.proc_main.errorOccurred.connect(self._main_error)
+        # Ensure no other threads are holding the camera
+        if self.preview_worker and self.preview_worker.isRunning():
+            self.preview_worker.stop()
+            self.preview_worker.wait(500)
+            self.preview_worker = None
+
+        if hasattr(self, "homo_worker") and self.homo_worker and self.homo_worker.isRunning():
+            self.homo_worker.stop()
+            self.homo_worker.wait(500)
+            self.homo_worker = None
+
         self.proc_main.start()
         self._start_visual_timer()
         self._set_status("running")

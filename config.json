@@ -7,6 +7,6 @@
     "settleBreathSeconds": 1.0,
     "readyAssumeTimeout": 3.0,
     "holdPauseSeconds": 1.1,
-    "innerOnLeft": false,
+    "innerOnLeft": true,
     "cameraIndex": 0
 }

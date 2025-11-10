@@ -68,7 +68,7 @@ def load_config():
     cfg.setdefault("innerOnLeft", False)
 
     # Orientation
-    cfg.setdefault("startAxis", "y")   # 'y' overhead, 'x' side camera
+    cfg.setdefault("startAxis", "x")   # 'y' overhead, 'x' side camera
     cfg.setdefault("laneAxis", "x")    # lane split axis
 
     # Which side of startLine is LEGAL: "lt" => legal if value < startLine; "gt" => legal if value > startLine
@@ -280,8 +280,6 @@ def main():
     mp_pose = mp.solutions.pose
     pose_processor = mp_pose.Pose(min_detection_confidence=0.6, min_tracking_confidence=0.7)
 
-    cap = cv2.VideoCapture(config.get("cameraIndex", 0))
-
     # FSM
     state = "WAITING_FOR_SKATER"
     state_timer = None
@@ -340,10 +338,34 @@ def main():
             return v <= (config["startLine"] - band_px)
 
     try:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+
+        def _open_cap(idx):
+            return cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+
+        cam_idx = int(config.get("cameraIndex", 0))
+        cap = _open_cap(cam_idx)
+        fail_streak = 0
+
+        while True:
+            if cap is None or not cap.isOpened():
+                time.sleep(0.2)
+                cap = _open_cap(cam_idx)
+                continue
+
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                fail_streak += 1
+                if fail_streak >= 15:
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                    cap = None
+                    fail_streak = 0
+                continue
+
+            fail_streak = 0
+            now = time.perf_counter()
 
             now = time.perf_counter()
 

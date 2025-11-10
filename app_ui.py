@@ -1,18 +1,16 @@
 # app_ui.py
-import sys, json, os
+import sys, json, os, time
 from PyQt5.QtCore import Qt, QProcess, QTimer, pyqtSignal, QPoint
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QSpinBox, QDoubleSpinBox, QCheckBox, QTextEdit, QFileDialog, QMessageBox, QGroupBox, QGridLayout
+    QSpinBox, QDoubleSpinBox, QCheckBox, QTextEdit, QFileDialog, QMessageBox,
+    QGroupBox, QGridLayout, QSizePolicy, QComboBox
 )
 from PyQt5.QtGui import QPixmap, QPainter, QPen
 
 from video_worker import VideoWorker
 import numpy as np
 import cv2
-
-from PyQt5.QtWidgets import QSizePolicy
-
 
 APP_PY = "main.py"               # fault detection entry point
 HOMOGRAPHY_NPY = "homography_matrix.npy"
@@ -65,7 +63,6 @@ class SkatingControlPanel(QWidget):
         super().__init__()
         self.setWindowTitle("Skating — Unified Control Panel")
         self.proc_main = None
-        self._live_dir = "live"
 
         # theme
         self.setStyleSheet("""
@@ -79,12 +76,18 @@ class SkatingControlPanel(QWidget):
             QPushButton:disabled { color: #7b8794; border-color: #243042; }
             QTabBar::tab { background: #1a1f26; padding: 8px 14px; margin-right: 2px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
             QTabBar::tab:selected { background: #243042; color: #ffffff; }
-            QSpinBox, QDoubleSpinBox, QLineEdit { background: #0f1216; border: 1px solid #2a2f36; border-radius: 6px; padding: 6px; }
+            QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox { background: #0f1216; border: 1px solid #2a2f36; border-radius: 6px; padding: 6px; }
             QTextEdit { background: #0f1216; border: 1px solid #2a2f36; border-radius: 6px; }
             QLabel#status_ok { color: #42d392; } 
             QLabel#status_run { color: #f39c12; } 
             QLabel#status_err { color: #ff6b6b; }
         """)
+
+        # ping-pong visuals state
+        self._live_dir = "live"
+        self._left_mtime = 0.0
+        self._right_mtime = 0.0
+        self._last_watchdog_ts = time.time()
 
         self._build_ui()
         self._load_existing_config_if_any()
@@ -93,11 +96,6 @@ class SkatingControlPanel(QWidget):
         self._visual_timer = QTimer(self)
         self._visual_timer.setInterval(100)  # ~10 fps
         self._visual_timer.timeout.connect(self._update_visuals)
-
-        self._left_path = os.path.join("live", "left.jpg")
-        self._right_path = os.path.join("live", "right.jpg")
-        self._left_mtime = 0.0
-        self._right_mtime = 0.0
 
         QTimer.singleShot(0, self._update_buttons)
 
@@ -123,13 +121,11 @@ class SkatingControlPanel(QWidget):
         # --- Tabs ---
         tabs = QTabWidget()
         tabs.addTab(self._tab_dashboard(), "Dashboard")
+        tabs.addTab(self._tab_visuals(), "Visuals")
         tabs.addTab(self._tab_homography(), "Homography")
         tabs.addTab(self._tab_settings(), "Settings")
-        tabs.addTab(self._tab_visuals(), "Visuals")
         tabs.addTab(self._tab_logs(), "Logs")
-
         root.addWidget(tabs, 1)
-
 
         # --- Status ---
         status_row = QHBoxLayout()
@@ -171,6 +167,41 @@ class SkatingControlPanel(QWidget):
 
         # worker ref
         self.preview_worker = None
+        return w
+
+    def _tab_visuals(self):
+        w = QWidget(); lay = QVBoxLayout(w)
+
+        container = QGroupBox("Embedded Visuals")
+        outer = QHBoxLayout()
+
+        # Left visual
+        left_col = QVBoxLayout()
+        self.left_img = QLabel("Waiting for frames…")
+        self.left_img.setAlignment(Qt.AlignCenter)
+        self.left_img.setMinimumHeight(400)
+        self.left_img.setStyleSheet("border: 1px solid #2a2f36; border-radius: 6px;")
+        self.left_img.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.left_img.setScaledContents(True)
+        left_col.addWidget(self.left_img)
+
+        # Right visual
+        right_col = QVBoxLayout()
+        self.right_img = QLabel("Waiting for frames…")
+        self.right_img.setAlignment(Qt.AlignCenter)
+        self.right_img.setMinimumHeight(400)
+        self.right_img.setStyleSheet("border: 1px solid #2a2f36; border-radius: 6px;")
+        self.right_img.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.right_img.setScaledContents(True)
+        right_col.addWidget(self.right_img)
+
+        outer.addLayout(left_col)
+        outer.addLayout(right_col)
+        outer.setStretch(0, 1)
+        outer.setStretch(1, 1)
+
+        container.setLayout(outer)
+        lay.addWidget(container)
         return w
 
     def _tab_homography(self):
@@ -217,15 +248,15 @@ class SkatingControlPanel(QWidget):
             r += 1
 
         # geometry
-        self.pre_start_min = QSpinBox(); self.pre_start_min.setRange(1, 700); self.pre_start_min.setValue(180)
-        self.pre_start_max = QSpinBox(); self.pre_start_max.setRange(1, 700); self.pre_start_max.setValue(220)
-        self.start_line    = QSpinBox(); self.start_line.setRange(1, 700);  self.start_line.setValue(400)
+        self.pre_start_min = QSpinBox(); self.pre_start_min.setRange(1, 700); self.pre_start_min.setValue(330)
+        self.pre_start_max = QSpinBox(); self.pre_start_max.setRange(1, 700); self.pre_start_max.setValue(430)
+        self.start_line    = QSpinBox(); self.start_line.setRange(1, 1000);  self.start_line.setValue(700)
 
         # thresholds
         self.threshold = QDoubleSpinBox(); self.threshold.setDecimals(3); self.threshold.setSingleStep(0.001); self.threshold.setRange(0.001, 0.1); self.threshold.setValue(0.015)
         self.micro_tremor = QDoubleSpinBox(); self.micro_tremor.setDecimals(3); self.micro_tremor.setSingleStep(0.001); self.micro_tremor.setRange(0.001, 0.05); self.micro_tremor.setValue(0.008)
 
-        # timings
+        # timings (seconds)
         self.settle_breath = QDoubleSpinBox(); self.settle_breath.setDecimals(1); self.settle_breath.setRange(0.0, 10.0); self.settle_breath.setValue(1.0)
         self.ready_timeout = QDoubleSpinBox(); self.ready_timeout.setDecimals(1); self.ready_timeout.setRange(1.0, 10.0); self.ready_timeout.setValue(3.0)
         self.hold_time     = QDoubleSpinBox(); self.hold_time.setDecimals(2); self.hold_time.setRange(0.5, 5.0); self.hold_time.setValue(1.10)
@@ -235,6 +266,18 @@ class SkatingControlPanel(QWidget):
 
         # camera index also lives here (saved to config)
         self.settings_cam_index = QSpinBox(); self.settings_cam_index.setRange(0, 99); self.settings_cam_index.setValue(0)
+        # NEW: orientation / rules
+        self.start_axis = QComboBox(); self.start_axis.addItems(["x", "y"])
+        self.lane_axis  = QComboBox(); self.lane_axis.addItems(["x", "y"])
+        self.legal_side = QComboBox(); self.legal_side.addItems(["lt", "gt"])
+
+        # NEW: movement timing guards (ms)
+        self.ready_grace_ms = QSpinBox(); self.ready_grace_ms.setRange(0, 2000); self.ready_grace_ms.setValue(300)
+        self.need_moving_ms = QSpinBox(); self.need_moving_ms.setRange(0, 2000); self.need_moving_ms.setValue(200)
+
+        # NEW: two-level threshold tuning
+        self.weak_factor = QDoubleSpinBox(); self.weak_factor.setDecimals(2); self.weak_factor.setRange(1.0, 3.0); self.weak_factor.setSingleStep(0.05); self.weak_factor.setValue(1.35)
+        self.quiet_ms    = QSpinBox(); self.quiet_ms.setRange(0, 2000); self.quiet_ms.setValue(180)
 
         add_row("Pre-Start Zone Min (Map Y):", self.pre_start_min)
         add_row("Pre-Start Zone Max (Map Y):", self.pre_start_max)
@@ -246,6 +289,15 @@ class SkatingControlPanel(QWidget):
         add_row("Hold (READY → gun) (s):",           self.hold_time)
         add_row("Inner Lane is on the Camera's Left", self.inner_left)
         add_row("Default Camera Index", self.settings_cam_index)
+
+        # NEW rows
+        add_row("Start Axis (x/y):",             self.start_axis)
+        add_row("Lane Axis (x/y):",              self.lane_axis)
+        add_row("Legal Side of Start Line:",     self.legal_side)
+        add_row("READY grace (ms):",             self.ready_grace_ms)
+        add_row("Need moving (ms):",             self.need_moving_ms)
+        add_row("Weak factor:",                  self.weak_factor)
+        add_row("Quiet/still before HOLD (ms):", self.quiet_ms)
 
         btn_row = QHBoxLayout()
         self.btn_save = QPushButton("Save Settings")
@@ -266,41 +318,6 @@ class SkatingControlPanel(QWidget):
         btn_row.addWidget(export_btn); btn_row.addStretch(1)
         lay.addLayout(btn_row)
         return w
-    
-    def _tab_visuals(self):
-        w = QWidget()
-        lay = QVBoxLayout(w)
-
-        grid = QHBoxLayout()
-        left_box = QVBoxLayout()
-        right_box = QVBoxLayout()
-
-        grid.setStretch(0, 1)
-        grid.setStretch(1, 1)
-
-        self.left_img = QLabel("Waiting for frames…")
-        self.left_img.setAlignment(Qt.AlignCenter)
-        self.left_img.setMinimumHeight(400)
-        self.left_img.setStyleSheet("border: 1px solid #2a2f36; border-radius: 6px;")
-        self.left_img.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.left_img.setScaledContents(True)
-
-        self.right_img = QLabel("Waiting for frames…")
-        self.right_img.setAlignment(Qt.AlignCenter)
-        self.right_img.setMinimumHeight(400)
-        self.right_img.setStyleSheet("border: 1px solid #2a2f36; border-radius: 6px;")
-        self.right_img.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.right_img.setScaledContents(True)
-
-
-        left_box.addWidget(self.left_img)
-        right_box.addWidget(self.right_img)
-        grid.addLayout(left_box)
-        grid.addLayout(right_box)
-
-        lay.addLayout(grid)
-        return w
-
 
     # ---------- Config I/O ----------
     def _load_existing_config_if_any(self):
@@ -320,6 +337,16 @@ class SkatingControlPanel(QWidget):
                 cam_idx = int(cfg.get("cameraIndex", 0))
                 self.settings_cam_index.setValue(cam_idx)
                 self.cam_index_spin.setValue(cam_idx)
+
+                # NEW fields
+                self.start_axis.setCurrentText(str(cfg.get("startAxis", "x")))
+                self.lane_axis.setCurrentText(str(cfg.get("laneAxis", "x")))
+                self.legal_side.setCurrentText(str(cfg.get("legal_side", "gt")))
+                self.ready_grace_ms.setValue(int(cfg.get("readyGraceMs", 300)))
+                self.need_moving_ms.setValue(int(cfg.get("needMovingMs", 200)))
+                self.weak_factor.setValue(float(cfg.get("weakFactor", 1.35)))
+                self.quiet_ms.setValue(int(cfg.get("quietMs", 180)))
+
                 self._append_log("Loaded existing config.json")
             except Exception as e:
                 self._append_log(f"Failed to load config.json: {e}")
@@ -336,6 +363,15 @@ class SkatingControlPanel(QWidget):
             "holdPauseSeconds": float(self.hold_time.value()),
             "innerOnLeft": bool(self.inner_left.isChecked()),
             "cameraIndex": int(self.settings_cam_index.value()),
+
+            # NEW
+            "startAxis": self.start_axis.currentText(),
+            "laneAxis": self.lane_axis.currentText(),
+            "legal_side": self.legal_side.currentText(),
+            "readyGraceMs": int(self.ready_grace_ms.value()),
+            "needMovingMs": int(self.need_moving_ms.value()),
+            "weakFactor": float(self.weak_factor.value()),
+            "quietMs": int(self.quiet_ms.value()),
         }
 
     def save_settings(self):
@@ -351,29 +387,25 @@ class SkatingControlPanel(QWidget):
         if self.proc_main and self.proc_main.state() != QProcess.NotRunning:
             QMessageBox.information(self, "Already Running", "Fault detection is already running.")
             return
+
+        # Ensure no other threads hold the camera
+        if self.preview_worker and self.preview_worker.isRunning():
+            self.preview_worker.stop(); self.preview_worker.wait(500); self.preview_worker = None
+        if hasattr(self, "homo_worker") and self.homo_worker and self.homo_worker.isRunning():
+            self.homo_worker.stop(); self.homo_worker.wait(500); self.homo_worker = None
+
         self.save_settings()
         self._append_log("Launching main.py …")
         self.proc_main = QProcess(self)
         python = sys.executable
         self.proc_main.setProgram(python)
-        # Pass camera index as an argument so main.py can pick it up.
+        # Pass camera index as an argument so main.py can pick it up (also saved in config)
         cam_idx = str(self.settings_cam_index.value())
         self.proc_main.setArguments([APP_PY, "--camera-index", cam_idx])
         self.proc_main.setProcessChannelMode(QProcess.MergedChannels)
         self.proc_main.readyReadStandardOutput.connect(self._read_main_stdout)
         self.proc_main.finished.connect(self._main_exited)
         self.proc_main.errorOccurred.connect(self._main_error)
-        # Ensure no other threads are holding the camera
-        if self.preview_worker and self.preview_worker.isRunning():
-            self.preview_worker.stop()
-            self.preview_worker.wait(500)
-            self.preview_worker = None
-
-        if hasattr(self, "homo_worker") and self.homo_worker and self.homo_worker.isRunning():
-            self.homo_worker.stop()
-            self.homo_worker.wait(500)
-            self.homo_worker = None
-
         self.proc_main.start()
         self._start_visual_timer()
         self._set_status("running")
@@ -404,6 +436,11 @@ class SkatingControlPanel(QWidget):
 
     # ---------- Dashboard: preview ----------
     def _toggle_preview(self):
+        # Block preview while main.py is running to avoid device contention
+        if self.proc_main and self.proc_main.state() != QProcess.NotRunning:
+            self._append_log("Preview disabled while main.py is running.")
+            return
+
         if self.preview_worker and self.preview_worker.isRunning():
             self.preview_worker.stop()
             self.preview_worker.wait(500)
@@ -437,6 +474,11 @@ class SkatingControlPanel(QWidget):
 
     # ---------- Homography tab ----------
     def _toggle_homo_cam(self):
+        # Block homography camera while main.py is running
+        if self.proc_main and self.proc_main.state() != QProcess.NotRunning:
+            self._append_log("Homography camera disabled while main.py is running.")
+            return
+
         if self.homo_worker and self.homo_worker.isRunning():
             self.homo_worker.stop()
             self.homo_worker.wait(500)
@@ -519,7 +561,6 @@ class SkatingControlPanel(QWidget):
         self._update_buttons()
         self._stop_visual_timer()
 
-
     def _main_error(self, err):
         self._append_log(f"main.py process error: {err}")
         self._set_status("error")
@@ -539,9 +580,15 @@ class SkatingControlPanel(QWidget):
 
     def _update_buttons(self):
         running = bool(self.proc_main and self.proc_main.state() != QProcess.NotRunning)
-        self.btn_start.setEnabled(not running if False else not running)  # avoid linter fold; keep explicit
+        self.btn_start.setEnabled(not running)
         self.btn_restart.setEnabled(True)
         self.btn_stop.setEnabled(running)
+
+        # Disable preview/homography while main runs
+        if hasattr(self, "btn_preview"):
+            self.btn_preview.setEnabled(not running)
+        if hasattr(self, "btn_homo_start"):
+            self.btn_homo_start.setEnabled(not running)
 
     def _set_status(self, state: str):
         if state == "running":
@@ -555,6 +602,7 @@ class SkatingControlPanel(QWidget):
             self.status_lbl.setObjectName("status_ok")
         self.status_lbl.style().unpolish(self.status_lbl); self.status_lbl.style().polish(self.status_lbl)
 
+    # ---------- Visuals (ping-pong) ----------
     def _start_visual_timer(self):
         self._left_mtime = 0.0
         self._right_mtime = 0.0
@@ -567,34 +615,45 @@ class SkatingControlPanel(QWidget):
         self.right_img.setText("Waiting for frames…")
         self._append_log("Embedded visuals: stopped")
 
-
     def _load_pingpong(self, name, label, last_mtime_attr):
         """
-        name: "left" or "right"
-        label: QLabel to paint into
-        last_mtime_attr: "_left_mtime" or "_right_mtime"
+        name: 'left' or 'right'
+        label: QLabel to display into
+        last_mtime_attr: '_left_mtime' or '_right_mtime'
         """
-        # read which slot is safe
         flag_path = os.path.join(self._live_dir, f"{name}.flag")
         try:
             with open(flag_path, "r", encoding="utf-8") as f:
-                slot = f.read().strip()            # "a" or "b"
+                slot = (f.read() or "").strip()    # "a" or "b"
+            if slot not in ("a", "b"):
+                return
             img_path = os.path.join(self._live_dir, f"{name}_{slot}.jpg")
-            if os.path.exists(img_path):
-                mt = os.path.getmtime(img_path)
-                if mt != getattr(self, last_mtime_attr):
-                    setattr(self, last_mtime_attr, mt)
-                    pm = QPixmap(img_path)
-                    if not pm.isNull():
-                        label.setPixmap(pm.scaled(label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            if not os.path.exists(img_path):
+                return
+            mt = os.path.getmtime(img_path)
+            if mt == getattr(self, last_mtime_attr, 0.0):
+                return
+            setattr(self, last_mtime_attr, mt)
+            pm = QPixmap(img_path)
+            if not pm.isNull():
+                label.setPixmap(pm.scaled(label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
         except Exception:
+            # transient I/O races are fine; next tick will refresh
             pass
 
     def _update_visuals(self):
         self._load_pingpong("left",  self.left_img,  "_left_mtime")
+        self._load_pingong_safe = getattr(self, "_load_pingpong", None)
         self._load_pingpong("right", self.right_img, "_right_mtime")
 
-
+        # Optional: small watchdog log if frames stale > 3s
+        now = time.time()
+        if (now - self._left_mtime > 3.0) and (now - self._right_mtime > 3.0):
+            if now - self._last_watchdog_ts > 3.0:
+                self._append_log("Frames stale >3s — check camera/main.py")
+                self._last_watchdog_ts = now
+        else:
+            self._last_watchdog_ts = now
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

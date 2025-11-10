@@ -8,5 +8,12 @@
     "readyAssumeTimeout": 3.0,
     "holdPauseSeconds": 1.1,
     "innerOnLeft": true,
-    "cameraIndex": 0
+    "cameraIndex": 0,
+    "startAxis": "x",
+    "laneAxis": "x",
+    "legal_side": "gt",
+    "readyGraceMs": 300,
+    "needMovingMs": 200,
+    "weakFactor": 1.35,
+    "quietMs": 180
 }

@@ -1,25 +1,23 @@
+import os
 import cv2
-import numpy as np
-import mediapipe as mp
+import math
 import time
 import json
 import pygame
-import math
+import numpy as np
+import mediapipe as mp
+import argparse
+from itertools import cycle
 
 from movement import is_movement
 from utils import get_pose_landmarks, get_landmark_center, transform_point
 from mediapipe.python.solutions.pose import PoseLandmark as PL
-from itertools import cycle
 
-import os, tempfile 
+# =========================
+# Publish dir (UI polls files here)
+# =========================
 PUBLISH_DIR = "live"
 os.makedirs(PUBLISH_DIR, exist_ok=True)
-
-
-PUBLISH_DIR = "live"
-
-# one toggler per stream
-_toggles = {"left": cycle(("a", "b")), "right": cycle(("a", "b"))}
 
 # =========================
 # Sound files
@@ -36,7 +34,6 @@ OUTER_LANE_SOUND = "Sounds/outer_lane.mp3"
 READY_SOUND = "Sounds/ready.mp3"
 WHISTLE_SOUND = "Sounds/whistle.mp3"
 SECOND_SHOT_SOUND = "Sounds/falseStartBuzzer.mp3"
-NOT_STABLE_SOUND = "Sounds/not_stable.mp3"
 
 # =========================
 # Mixer cache (module-level, used by AudioGate)
@@ -99,29 +96,33 @@ def reason_to_sound(reason: str):
     if reason == "Going down too slow":
         return DOWN_TOO_SLOW_SOUND
     if reason == "Not stable":
-        return NOT_STABLE_SOUND
+        return BUZZER_SOUND
     return None
 
+# =========================
+# Ping-pong publisher (atomic, no partial reads)
+# =========================
+_toggles = {"left": cycle(("a", "b")), "right": cycle(("a", "b"))}
 
 def publish_frame(name: str, frame):
     """
-    Ping-pong writer: write to left_a.jpg/left_b.jpg (or right_a/right_b)
-    then update a tiny flag file so the UI knows which one is complete.
+    Write to left_a.jpg/left_b.jpg (or right_a/right_b) then atomically update {name}.flag to 'a' or 'b'.
+    The UI reads {name}.flag to know which image is complete.
     """
-    os.makedirs(PUBLISH_DIR, exist_ok=True)
-    slot = next(_toggles[name])               # "a" or "b"
-    base = os.path.join(PUBLISH_DIR, f"{name}_{slot}.jpg")
-    ok = cv2.imwrite(base, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-    if not ok:
-        return
-    # atomically tell the UI which one to read
-    flag_tmp = os.path.join(PUBLISH_DIR, f".{name}.flag.tmp")
-    flag     = os.path.join(PUBLISH_DIR, f"{name}.flag")
-    with open(flag_tmp, "w", encoding="utf-8") as f:
-        f.write(slot)                          # "a" or "b"
-    os.replace(flag_tmp, flag)                 # atomic for Windows & POSIX
-
-
+    try:
+        slot = next(_toggles[name])           # "a" or "b"
+        path = os.path.join(PUBLISH_DIR, f"{name}_{slot}.jpg")
+        ok = cv2.imwrite(path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        if not ok:
+            return
+        # atomic flag update
+        flag_tmp = os.path.join(PUBLISH_DIR, f".{name}.flag.tmp")
+        flag     = os.path.join(PUBLISH_DIR, f"{name}.flag")
+        with open(flag_tmp, "w", encoding="utf-8") as f:
+            f.write(slot)
+        os.replace(flag_tmp, flag)
+    except Exception as e:
+        print(f"[publish_frame] error for {name}: {e}")
 
 # =========================
 # AudioGate (non-blocking, interrupt-capable)
@@ -272,7 +273,15 @@ def estimate_body_size(landmarks, frame, fallback=300.0):
 # Main loop
 # =========================
 def main():
+    # ---- CLI override for camera index (optional) ----
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--camera-index", type=int, help="Override camera index")
+    args, _ = parser.parse_known_args()
+
     config = load_config()
+    if args.camera_index is not None:
+        config["cameraIndex"] = int(args.camera_index)
+
     H = load_homography_matrix()
     if H is None:
         return
@@ -290,21 +299,18 @@ def main():
 
     # False start tracking
     false_start_count_by_pair = 0
-
     touched_line_after_ready = False
-
-    MAP_WIDTH = 1000
-    MAP_HEIGHT = 500
-
     offender_lane = None
     last_false_reason = ""
-
     played_lane_cue = False
     warned_touch_after_ready = False
 
     audio_gate = AudioGate()
 
-    start_axis = (config.get("startAxis") or "y").lower()
+    MAP_WIDTH = 1000
+    MAP_HEIGHT = 500
+
+    start_axis = (config.get("startAxis") or "x").lower()
     lane_axis  = (config.get("laneAxis")  or "x").lower()
     legal_side = (config.get("legal_side") or "lt").lower()
     assert start_axis in ("x", "y")
@@ -337,15 +343,16 @@ def main():
         else:                      # legal is > startLine
             return v <= (config["startLine"] - band_px)
 
+    # ------------- robust camera open/read -------------
+    def _open_cap(idx):
+        # Use the same backend your preview uses on Windows for stability
+        return cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+
+    cam_idx = int(config.get("cameraIndex", 0))
+    cap = _open_cap(cam_idx)
+    fail_streak = 0
+
     try:
-
-        def _open_cap(idx):
-            return cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-
-        cam_idx = int(config.get("cameraIndex", 0))
-        cap = _open_cap(cam_idx)
-        fail_streak = 0
-
         while True:
             if cap is None or not cap.isOpened():
                 time.sleep(0.2)
@@ -355,7 +362,7 @@ def main():
             ok, frame = cap.read()
             if not ok or frame is None:
                 fail_streak += 1
-                if fail_streak >= 15:
+                if fail_streak >= 15:  # ~0.5s at ~30fps; tune as needed
                     try:
                         cap.release()
                     except Exception:
@@ -365,233 +372,255 @@ def main():
                 continue
 
             fail_streak = 0
-            now = time.perf_counter()
 
-            now = time.perf_counter()
+            # ----------------- per-frame safe block -----------------
+            try:
+                now = time.perf_counter()
 
-            # Pose landmarks for the *current* visible skater(s)
-            landmarks = get_pose_landmarks(frame, pose_processor)
+                # Pose landmarks for the *current* visible skater(s)
+                landmarks = get_pose_landmarks(frame, pose_processor)
 
-            # Feet & hands in map coords
-            ankles_center_orig = get_landmark_center(landmarks, frame, [PL.LEFT_ANKLE, PL.RIGHT_ANKLE])
-            ankles_center_map = transform_point(ankles_center_orig, H) if ankles_center_orig else None
+                # Feet & hands in map coords
+                ankles_center_orig = get_landmark_center(landmarks, frame, [PL.LEFT_ANKLE, PL.RIGHT_ANKLE])
+                ankles_center_map = transform_point(ankles_center_orig, H) if ankles_center_orig else None
 
-            left_hand_map  = get_map_point_for_landmarks(frame, landmarks, [PL.LEFT_WRIST, PL.LEFT_INDEX], H) if landmarks else None
-            right_hand_map = get_map_point_for_landmarks(frame, landmarks, [PL.RIGHT_WRIST, PL.RIGHT_INDEX], H) if landmarks else None
+                left_hand_map  = get_map_point_for_landmarks(frame, landmarks, [PL.LEFT_WRIST, PL.LEFT_INDEX], H) if landmarks else None
+                right_hand_map = get_map_point_for_landmarks(frame, landmarks, [PL.RIGHT_WRIST, PL.RIGHT_INDEX], H) if landmarks else None
 
-            # Movement detection (from movement.py)
-            significant_move, smoothed_mag = is_movement(
-                frame, pose_processor, landmark_history, movement_history,
-                config['threshold'], config['microTremor']
-            )
+                # Movement detection (from movement.py)
+                significant_move, smoothed_mag = is_movement(
+                    frame, pose_processor, landmark_history, movement_history,
+                    config['threshold'], config['microTremor']
+                )
 
-            # Two-level movement
-            move_strong = bool(significant_move)  # EMA >= threshold
-            move_weak   = bool(smoothed_mag > (config['microTremor'] * weak_factor))  # creeping above tremor
+                # Two-level movement
+                move_strong = bool(significant_move)  # EMA >= threshold
+                move_weak   = bool(smoothed_mag > (config['microTremor'] * weak_factor))  # creeping above tremor
 
-            # Strong sustain
-            if move_strong:
-                if moving_on_since_strong is None:
-                    moving_on_since_strong = now
-            else:
-                moving_on_since_strong = None
-
-            # Weak sustain + stillness
-            if move_weak:
-                if moving_on_since_weak is None:
-                    moving_on_since_weak = now
-                still_since_weak = None
-            else:
-                moving_on_since_weak = None
-                if still_since_weak is None:
-                    still_since_weak = now
-
-            # Lane by lane_axis
-            current_lane = None
-            if ankles_center_map is not None:
-                lane_val = axis_value(ankles_center_map, lane_axis)
-                axis_len = MAP_WIDTH if lane_axis == "x" else MAP_HEIGHT
-                current_lane = lane_for_axis(lane_val, axis_len=axis_len, inner_on_left=config.get("innerOnLeft", False))
-
-            # Filtered line touches on start axis
-            ankle_val = axis_value(ankles_center_map, start_axis)
-            left_val  = axis_value(left_hand_map,  start_axis)
-            right_val = axis_value(right_hand_map, start_axis)
-
-            ankle_touching = ankle_touch_f.sample(ankle_val, now)
-            left_touching  = left_touch_f.sample(left_val,  now)
-            right_touching = right_touch_f.sample(right_val, now)
-
-            # Direction-aware illegal touch
-            ankle_illegal = ankle_touching and is_illegal(ankle_val)
-            left_illegal  = left_touching  and is_illegal(left_val)
-            right_illegal = right_touching and is_illegal(right_val)
-            any_illegal_touch = ankle_illegal or left_illegal or right_illegal
-
-            # --- STATE MACHINE ---
-            if state == "WAITING_FOR_SKATER":
-                in_band_val = axis_value(ankles_center_map, start_axis)
-                if (in_band_val is not None) and (config["preStartMin"] < in_band_val < config["preStartMax"]):
-                    state = "IN_PRE_START"
-                    state_timer = now
-                    touched_line_after_ready = False
-                    offender_lane = None
-                    last_false_reason = ""
-                    played_lane_cue = False
-                    warned_touch_after_ready = False
-                    print("Skaters behind pre-start band. Waiting...")
-
-            elif state == "IN_PRE_START":
-                in_band_val = axis_value(ankles_center_map, start_axis)
-                in_band = (in_band_val is not None) and (config["preStartMin"] < in_band_val < config["preStartMax"])
-                if not in_band:
-                    state = "WAITING_FOR_SKATER"
+                # Strong sustain
+                if move_strong:
+                    if moving_on_since_strong is None:
+                        moving_on_since_strong = now
                 else:
-                    if not played_lane_cue and current_lane:
-                        played_lane_cue = True
-                    if (now - state_timer) >= 3.0:
-                        print('Starter (to skaters): "Go to the start"')
-                        audio_gate.play(GO_TO_THE_START_SOUND)
-                        state = "SAY_GO_TO_START"
-
-            elif state == "SAY_GO_TO_START":
-                if audio_gate.is_done():
-                    state = "APPROACHING_START"
-                    state_timer = now
-
-            elif state == "APPROACHING_START":
-                start_line_val = config["startLine"]
-                val = axis_value(ankles_center_map, start_axis)
-                if (val is not None) and ((start_line_val - 50) < val < (start_line_val + 2)):
-                    print("Skaters at start line. Wait for settle/breath...")
-                    state = "SETTLE_BEFORE_READY"
-                    state_timer = now
-
-            elif state == "SETTLE_BEFORE_READY":
-                if (now - state_timer) >= config["settleBreathSeconds"]:
-                    print('Starter: *raises gun*')
-                    print('Starter (clearly): "Ready."')
-                    audio_gate.play(READY_SOUND)
-                    state = "AFTER_READY_AUDIO"
-                else:
-                    val = axis_value(ankles_center_map, start_axis)
-                    if (val is None) or (val < (config["startLine"] - 60)):
-                        state = "APPROACHING_START"
-
-            elif state == "AFTER_READY_AUDIO":
-                if audio_gate.is_done():
-                    state = "READY_WAIT_POSITION"
-                    state_timer = now
-                    touched_line_after_ready = False
-                    warned_touch_after_ready = False
-                    # Reset movement timers exactly when READY completes
                     moving_on_since_strong = None
-                    moving_on_since_weak   = None
-                    still_since_weak       = None
 
-            elif state == "READY_WAIT_POSITION":
-                elapsed = now - state_timer
-
-                # Illegal touch after READY?
-                if any_illegal_touch:
-                    if not warned_touch_after_ready:
-                        # audio_gate.play(BUZZER_SOUND)  # warning beep
-                        warned_touch_after_ready = True
-                    touched_line_after_ready = True
-                    offender_lane = offender_lane or current_lane
-
-                if touched_line_after_ready:
-                    last_false_reason = "Crossing the line"
-                    state = "FALSE_START"
+                # Weak sustain + stillness
+                if move_weak:
+                    if moving_on_since_weak is None:
+                        moving_on_since_weak = now
+                    still_since_weak = None
                 else:
-                    # After the READY grace:
-                    if elapsed >= ready_grace_s:
-                        # 1) Strong, sustained movement → "Not stable" if within timeout; else "Going down too slow"
-                        if moving_on_since_strong and (now - moving_on_since_strong) >= need_moving_s:
-                            if elapsed <= config["readyAssumeTimeout"]:
-                                last_false_reason = "Not stable"
-                                offender_lane = offender_lane or current_lane
-                                state = "FALSE_START"
-                            else:
-                                last_false_reason = "Going down too slow"
-                                offender_lane = offender_lane or current_lane
-                                state = "FALSE_START"
-                        # 2) After timeout, even weak sustained movement counts → "Going down too slow"
-                        elif elapsed > config["readyAssumeTimeout"]:
-                            if moving_on_since_weak and (now - moving_on_since_weak) >= need_moving_s:
-                                last_false_reason = "Going down too slow"
-                                offender_lane = offender_lane or current_lane
-                                state = "FALSE_START"
+                    moving_on_since_weak = None
+                    if still_since_weak is None:
+                        still_since_weak = now
 
-                    # Enter HOLD only if weak-still long enough and still within timeout
-                    if state == "READY_WAIT_POSITION" and elapsed < config["readyAssumeTimeout"]:
-                        if (still_since_weak is not None) and ((now - still_since_weak) >= quiet_s):
-                            state = "HOLD_BEFORE_GUN"
-                            state_timer = now
-                            print("Both skaters appear set. Holding...")
+                # Lane by lane_axis
+                current_lane = None
+                if ankles_center_map is not None:
+                    lane_val = axis_value(ankles_center_map, lane_axis)
+                    axis_len = MAP_WIDTH if lane_axis == "x" else MAP_HEIGHT
+                    current_lane = lane_for_axis(lane_val, axis_len=axis_len, inner_on_left=config.get("innerOnLeft", False))
 
-            elif state == "HOLD_BEFORE_GUN":
-                hold_elapsed = now - state_timer
+                # Filtered line touches on start axis
+                ankle_val = axis_value(ankles_center_map, start_axis)
+                left_val  = axis_value(left_hand_map,  start_axis)
+                right_val = axis_value(right_hand_map, start_axis)
 
-                # Sustained strong or weak movement during hold → Not stable
-                if (moving_on_since_strong and (now - moving_on_since_strong) >= need_moving_s) or \
-                   (moving_on_since_weak   and (now - moving_on_since_weak)   >= need_moving_s):
-                    last_false_reason = "Not stable"
-                    offender_lane = offender_lane or current_lane
-                    state = "FALSE_START"
+                ankle_touching = ankle_touch_f.sample(ankle_val, now)
+                left_touching  = left_touch_f.sample(left_val,  now)
+                right_touching = right_touch_f.sample(right_val, now)
 
-                elif hold_elapsed >= config["holdPauseSeconds"]:
-                    print("** GUN FIRED **")
-                    audio_gate.play(GUN_SHOT_SOUND)
-                    state = "AFTER_GUN_AUDIO"
+                # Direction-aware illegal touch
+                ankle_illegal = ankle_touching and is_illegal(ankle_val)
+                left_illegal  = left_touching  and is_illegal(left_val)
+                right_illegal = right_touching and is_illegal(right_val)
+                any_illegal_touch = ankle_illegal or left_illegal or right_illegal
 
-            elif state == "AFTER_GUN_AUDIO":
-                if audio_gate.is_done():
-                    state = "RACE_ACTIVE"
+                # --- STATE MACHINE ---
+                if state == "WAITING_FOR_SKATER":
+                    in_band_val = axis_value(ankles_center_map, start_axis)
+                    if (in_band_val is not None) and (config["preStartMin"] < in_band_val < config["preStartMax"]):
+                        state = "IN_PRE_START"
+                        state_timer = now
+                        touched_line_after_ready = False
+                        offender_lane = None
+                        last_false_reason = ""
+                        played_lane_cue = False
+                        warned_touch_after_ready = False
+                        print("Skaters behind pre-start band. Waiting...")
 
-            elif state == "RACE_ACTIVE":
-                # Nothing after the race starts
-                # I'll add it later if needed
-                pass
-
-            elif state == "FALSE_START":
-                print("** FALSE START **")
-                # whistle then second shot (or fallback) in sequence
-                if audio_gate.play(WHISTLE_SOUND, interrupt=True):
-                    state = "AFTER_WHISTLE_AUDIO"
-                else:
-                    state = "AFTER_WHISTLE_AUDIO"
-
-            elif state == "AFTER_WHISTLE_AUDIO":
-                if audio_gate.is_done():
-                    if not audio_gate.play(SECOND_SHOT_SOUND, interrupt=True):
-                        audio_gate.play(FALSE_START_SOUND, interrupt=True)
-                    state = "AFTER_FALSE_AUDIO"
-
-            elif state == "AFTER_FALSE_AUDIO":
-                if audio_gate.is_done():
-                    false_start_count_by_pair += 1
-                    lane_txt = offender_lane or (current_lane or "inner/outer")
-                    reason = last_false_reason or "Started before gun"
-
-                    print(f'Starter: "False start, {lane_txt} lane"')
-                    print(f'Starter: "{reason}"')
-
-                    lane_sound = None
-                    if offender_lane == "inner":
-                        lane_sound = INNER_LANE_SOUND
-                    elif offender_lane == "outer":
-                        lane_sound = OUTER_LANE_SOUND
-
-                    if lane_sound and audio_gate.play(lane_sound):
-                        state = "AFTER_LANE_AUDIO"
+                elif state == "IN_PRE_START":
+                    in_band_val = axis_value(ankles_center_map, start_axis)
+                    in_band = (in_band_val is not None) and (config["preStartMin"] < in_band_val < config["preStartMax"])
+                    if not in_band:
+                        state = "WAITING_FOR_SKATER"
                     else:
-                        rs = reason_to_sound(reason)
+                        if not played_lane_cue and current_lane:
+                            played_lane_cue = True
+                        if (now - state_timer) >= 3.0:
+                            print('Starter (to skaters): "Go to the start"')
+                            audio_gate.play(GO_TO_THE_START_SOUND)
+                            state = "SAY_GO_TO_START"
+
+                elif state == "SAY_GO_TO_START":
+                    if audio_gate.is_done():
+                        state = "APPROACHING_START"
+                        state_timer = now
+
+                elif state == "APPROACHING_START":
+                    start_line_val = config["startLine"]
+                    val = axis_value(ankles_center_map, start_axis)
+                    if (val is not None) and ((start_line_val - 50) < val < (start_line_val + 2)):
+                        print("Skaters at start line. Wait for settle/breath...")
+                        state = "SETTLE_BEFORE_READY"
+                        state_timer = now
+
+                elif state == "SETTLE_BEFORE_READY":
+                    if (now - state_timer) >= config["settleBreathSeconds"]:
+                        print('Starter: *raises gun*')
+                        print('Starter (clearly): "Ready."')
+                        audio_gate.play(READY_SOUND)
+                        state = "AFTER_READY_AUDIO"
+                    else:
+                        val = axis_value(ankles_center_map, start_axis)
+                        if (val is None) or (val < (config["startLine"] - 60)):
+                            state = "APPROACHING_START"
+
+                elif state == "AFTER_READY_AUDIO":
+                    if audio_gate.is_done():
+                        state = "READY_WAIT_POSITION"
+                        state_timer = now
+                        touched_line_after_ready = False
+                        warned_touch_after_ready = False
+                        # Reset movement timers exactly when READY completes
+                        moving_on_since_strong = None
+                        moving_on_since_weak   = None
+                        still_since_weak       = None
+
+                elif state == "READY_WAIT_POSITION":
+                    elapsed = now - state_timer
+
+                    # Illegal touch after READY?
+                    if any_illegal_touch:
+                        if not warned_touch_after_ready:
+                            audio_gate.play(BUZZER_SOUND)  # warning beep
+                            warned_touch_after_ready = True
+                        touched_line_after_ready = True
+                        offender_lane = offender_lane or current_lane
+
+                    if touched_line_after_ready:
+                        last_false_reason = "Crossing the line"
+                        state = "FALSE_START"
+                    else:
+                        # After the READY grace:
+                        if elapsed >= ready_grace_s:
+                            # 1) Strong, sustained movement → "Not stable" if within timeout; else "Going down too slow"
+                            if moving_on_since_strong and (now - moving_on_since_strong) >= need_moving_s:
+                                if elapsed <= config["readyAssumeTimeout"]:
+                                    last_false_reason = "Not stable"
+                                    offender_lane = offender_lane or current_lane
+                                    state = "FALSE_START"
+                                else:
+                                    last_false_reason = "Going down too slow"
+                                    offender_lane = offender_lane or current_lane
+                                    state = "FALSE_START"
+                            # 2) After timeout, even weak sustained movement counts → "Going down too slow"
+                            elif elapsed > config["readyAssumeTimeout"]:
+                                if moving_on_since_weak and (now - moving_on_since_weak) >= need_moving_s:
+                                    last_false_reason = "Going down too slow"
+                                    offender_lane = offender_lane or current_lane
+                                    state = "FALSE_START"
+
+                        # Enter HOLD only if weak-still long enough and still within timeout
+                        if state == "READY_WAIT_POSITION" and elapsed < config["readyAssumeTimeout"]:
+                            if (still_since_weak is not None) and ((now - still_since_weak) >= quiet_s):
+                                state = "HOLD_BEFORE_GUN"
+                                state_timer = now
+                                print("Both skaters appear set. Holding...")
+
+                elif state == "HOLD_BEFORE_GUN":
+                    hold_elapsed = now - state_timer
+
+                    # Sustained strong or weak movement during hold → Not stable
+                    if (moving_on_since_strong and (now - moving_on_since_strong) >= need_moving_s) or \
+                       (moving_on_since_weak   and (now - moving_on_since_weak)   >= need_moving_s):
+                        last_false_reason = "Not stable"
+                        offender_lane = offender_lane or current_lane
+                        state = "FALSE_START"
+
+                    elif hold_elapsed >= config["holdPauseSeconds"]:
+                        print("** GUN FIRED **")
+                        audio_gate.play(GUN_SHOT_SOUND)
+                        state = "AFTER_GUN_AUDIO"
+
+                elif state == "AFTER_GUN_AUDIO":
+                    if audio_gate.is_done():
+                        state = "RACE_ACTIVE"
+
+                elif state == "RACE_ACTIVE":
+                    # Reserved for post-gun logic if needed
+                    pass
+
+                elif state == "FALSE_START":
+                    print("** FALSE START **")
+                    # whistle then second shot (or fallback) in sequence
+                    if audio_gate.play(WHISTLE_SOUND, interrupt=True):
+                        state = "AFTER_WHISTLE_AUDIO"
+                    else:
+                        state = "AFTER_WHISTLE_AUDIO"
+
+                elif state == "AFTER_WHISTLE_AUDIO":
+                    if audio_gate.is_done():
+                        if not audio_gate.play(SECOND_SHOT_SOUND, interrupt=True):
+                            audio_gate.play(FALSE_START_SOUND, interrupt=True)
+                        state = "AFTER_FALSE_AUDIO"
+
+                elif state == "AFTER_FALSE_AUDIO":
+                    if audio_gate.is_done():
+                        false_start_count_by_pair += 1
+                        lane_txt = offender_lane or (current_lane or "inner/outer")
+                        reason = last_false_reason or "Started before gun"
+
+                        print(f'Starter: "False start, {lane_txt} lane"')
+                        print(f'Starter: "{reason}"')
+
+                        lane_sound = None
+                        if offender_lane == "inner":
+                            lane_sound = INNER_LANE_SOUND
+                        elif offender_lane == "outer":
+                            lane_sound = OUTER_LANE_SOUND
+
+                        if lane_sound and audio_gate.play(lane_sound):
+                            state = "AFTER_LANE_AUDIO"
+                        else:
+                            rs = reason_to_sound(reason)
+                            if rs and audio_gate.play(rs):
+                                state = "AFTER_REASON_AUDIO"
+                            else:
+                                if false_start_count_by_pair >= 2:
+                                    print(f'Starter: "False start, {lane_txt} lane, disqualified"')
+                                    print("→ Send the other skater again.")
+                                    audio_gate.play(DISQUALIFIED_SOUND)
+                                    state = "AFTER_DQ_AUDIO"
+                                else:
+                                    state = "WAITING_FOR_SKATER"
+                                    state_timer = None
+                                    movement_history.clear()
+                                    landmark_history.clear()
+                                    touched_line_after_ready = False
+                                    offender_lane = None
+                                    last_false_reason = ""
+                                    audio_gate.play(GO_TO_THE_START_SOUND)
+                                    print('Starter: "Back to lanes — new start."')
+
+                elif state == "AFTER_LANE_AUDIO":
+                    if audio_gate.is_done():
+                        rs = reason_to_sound(last_false_reason)
                         if rs and audio_gate.play(rs):
                             state = "AFTER_REASON_AUDIO"
                         else:
                             if false_start_count_by_pair >= 2:
-                                print(f'Starter: "False start, {lane_txt} lane, disqualified"')
+                                print(f'Starter: "False start, {offender_lane or "inner/outer"} lane, disqualified"')
                                 print("→ Send the other skater again.")
                                 audio_gate.play(DISQUALIFIED_SOUND)
                                 state = "AFTER_DQ_AUDIO"
@@ -606,12 +635,8 @@ def main():
                                 audio_gate.play(GO_TO_THE_START_SOUND)
                                 print('Starter: "Back to lanes — new start."')
 
-            elif state == "AFTER_LANE_AUDIO":
-                if audio_gate.is_done():
-                    rs = reason_to_sound(last_false_reason)
-                    if rs and audio_gate.play(rs):
-                        state = "AFTER_REASON_AUDIO"
-                    else:
+                elif state == "AFTER_REASON_AUDIO":
+                    if audio_gate.is_done():
                         if false_start_count_by_pair >= 2:
                             print(f'Starter: "False start, {offender_lane or "inner/outer"} lane, disqualified"')
                             print("→ Send the other skater again.")
@@ -628,14 +653,9 @@ def main():
                             audio_gate.play(GO_TO_THE_START_SOUND)
                             print('Starter: "Back to lanes — new start."')
 
-            elif state == "AFTER_REASON_AUDIO":
-                if audio_gate.is_done():
-                    if false_start_count_by_pair >= 2:
-                        print(f'Starter: "False start, {offender_lane or "inner/outer"} lane, disqualified"')
-                        print("→ Send the other skater again.")
-                        audio_gate.play(DISQUALIFIED_SOUND)
-                        state = "AFTER_DQ_AUDIO"
-                    else:
+                elif state == "AFTER_DQ_AUDIO":
+                    if audio_gate.is_done():
+                        false_start_count_by_pair = 0
                         state = "WAITING_FOR_SKATER"
                         state_timer = None
                         movement_history.clear()
@@ -643,54 +663,46 @@ def main():
                         touched_line_after_ready = False
                         offender_lane = None
                         last_false_reason = ""
-                        audio_gate.play(GO_TO_THE_START_SOUND)
                         print('Starter: "Back to lanes — new start."')
 
-            elif state == "AFTER_DQ_AUDIO":
-                if audio_gate.is_done():
-                    false_start_count_by_pair = 0
-                    state = "WAITING_FOR_SKATER"
-                    state_timer = None
-                    movement_history.clear()
-                    landmark_history.clear()
-                    touched_line_after_ready = False
-                    offender_lane = None
-                    last_false_reason = ""
-                    print('Starter: "Back to lanes — new start."')
+                # --- Visualization ---
+                map_view = np.zeros((MAP_HEIGHT, MAP_WIDTH, 3), dtype=np.uint8)
+                if start_axis == "y":
+                    cv2.line(map_view, (0, config["preStartMin"]), (MAP_WIDTH, config["preStartMin"]), (255, 0, 0), 2)
+                    cv2.line(map_view, (0, config["preStartMax"]), (MAP_WIDTH, config["preStartMax"]), (255, 0, 0), 2)
+                    cv2.line(map_view, (0, config["startLine"]),   (MAP_WIDTH, config["startLine"]),   (0, 255, 0), 2)
+                else:
+                    cv2.line(map_view, (config["preStartMin"], 0), (config["preStartMin"], MAP_HEIGHT), (255, 0, 0), 2)
+                    cv2.line(map_view, (config["preStartMax"], 0), (config["preStartMax"], MAP_HEIGHT), (255, 0, 0), 2)
+                    cv2.line(map_view, (config["startLine"],   0), (config["startLine"],   MAP_HEIGHT), (0, 255, 0), 2)
 
-            # --- Visualization ---
-            map_view = np.zeros((MAP_HEIGHT, MAP_WIDTH, 3), dtype=np.uint8)
+                if ankles_center_map is not None:
+                    p = tuple(np.array(ankles_center_map, dtype=int))
+                    cv2.circle(map_view, p, 10, (0, 255, 255), -1)
 
-            if start_axis == "y":
-                cv2.line(map_view, (0, config["preStartMin"]), (MAP_WIDTH, config["preStartMin"]), (255, 0, 0), 2)
-                cv2.line(map_view, (0, config["preStartMax"]), (MAP_WIDTH, config["preStartMax"]), (255, 0, 0), 2)
-                cv2.line(map_view, (0, config["startLine"]),   (MAP_WIDTH, config["startLine"]),   (0, 255, 0), 2)
-            else:
-                cv2.line(map_view, (config["preStartMin"], 0), (config["preStartMin"], MAP_HEIGHT), (255, 0, 0), 2)
-                cv2.line(map_view, (config["preStartMax"], 0), (config["preStartMax"], MAP_HEIGHT), (255, 0, 0), 2)
-                cv2.line(map_view, (config["startLine"],   0), (config["startLine"],   MAP_HEIGHT), (0, 255, 0), 2)
+                # Debug overlays (movement.py signal)
+                cv2.putText(frame, f'State: {state}', (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                cv2.putText(frame, f'EMA(movement.py): {float(smoothed_mag):.4f}', (10, 54),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+                cv2.putText(frame, f'strong:{int(move_strong)} weak:{int(move_weak)}', (10, 78),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+                cv2.putText(frame, f'Illegal touch A/L/R: {int(ankle_illegal)}/{int(left_illegal)}/{int(right_illegal)}',
+                            (10, 102), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
-            if ankles_center_map is not None:
-                p = tuple(np.array(ankles_center_map, dtype=int))
-                cv2.circle(map_view, p, 10, (0, 255, 255), -1)
+                publish_frame("left", frame)       # appears in UI left panel
+                publish_frame("right", map_view)   # appears in UI right panel
 
-            # Debug overlays (movement.py signal)
-            cv2.putText(frame, f'State: {state}', (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            cv2.putText(frame, f'EMA(movement.py): {float(smoothed_mag):.4f}', (10, 54),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
-            cv2.putText(frame, f'strong:{int(move_strong)} weak:{int(move_weak)}', (10, 78),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
-            cv2.putText(frame, f'Illegal touch A/L/R: {int(ankle_illegal)}/{int(left_illegal)}/{int(right_illegal)}',
-                        (10, 102), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
-
-            publish_frame("left", frame)       # will appear in the left panel in the UI
-            publish_frame("right", map_view)   # will appear in the right panel in the UI
-
-            if cv2.waitKey(1) & 0xFF == 27:  # ESC quits
-                break
+            except Exception as e:
+                print(f"[frame error] {e}")
+                # keep looping; transient errors shouldn't kill the process
+                continue
 
     finally:
-        cap.release()
+        try:
+            if cap is not None:
+                cap.release()
+        except Exception:
+            pass
         cv2.destroyAllWindows()
         try:
             pose_processor.close()

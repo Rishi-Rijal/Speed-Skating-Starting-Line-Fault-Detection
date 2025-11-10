@@ -34,6 +34,7 @@ OUTER_LANE_SOUND = "Sounds/outer_lane.mp3"
 READY_SOUND = "Sounds/ready.mp3"
 WHISTLE_SOUND = "Sounds/whistle.mp3"
 SECOND_SHOT_SOUND = "Sounds/falseStartBuzzer.mp3"
+NOT_STABLE_SOUND = "Sounds/not_stable.mp3"
 
 # =========================
 # Mixer cache (module-level, used by AudioGate)
@@ -96,7 +97,7 @@ def reason_to_sound(reason: str):
     if reason == "Going down too slow":
         return DOWN_TOO_SLOW_SOUND
     if reason == "Not stable":
-        return BUZZER_SOUND
+        return NOT_STABLE_SOUND
     return None
 
 # =========================
@@ -503,7 +504,7 @@ def main():
                     # Illegal touch after READY?
                     if any_illegal_touch:
                         if not warned_touch_after_ready:
-                            audio_gate.play(BUZZER_SOUND)  # warning beep
+                            #audio_gate.play(BUZZER_SOUND)  # warning beep
                             warned_touch_after_ready = True
                         touched_line_after_ready = True
                         offender_lane = offender_lane or current_lane

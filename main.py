@@ -63,6 +63,7 @@ def load_config():
     cfg.setdefault("settleBreathSeconds", 1.0)
     cfg.setdefault("readyAssumeTimeout", 3.0)
     cfg.setdefault("holdPauseSeconds", 1.10)
+    cfg.setdefault("cameraIndex", 0)
     cfg.setdefault("innerOnLeft", False)
 
     # Orientation
@@ -278,7 +279,7 @@ def main():
     mp_pose = mp.solutions.pose
     pose_processor = mp_pose.Pose(min_detection_confidence=0.6, min_tracking_confidence=0.7)
 
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(config.get("cameraIndex", 0))
 
     # FSM
     state = "WAITING_FOR_SKATER"
